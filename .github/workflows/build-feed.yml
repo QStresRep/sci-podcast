@@ -36,12 +36,14 @@ jobs:
           python - <<'PY'
           import os, requests, datetime, email.utils, html
 
+          # === 环境变量 ===
           owner_repo = os.environ["REPO"]                # e.g. user/repo
-          token = os.environ["GH_TOKEN"]
-          title = os.environ.get("PODCAST_TITLE", "Podcast")
-          link = os.environ.get("PODCAST_LINK", "")
-          desc = os.environ.get("PODCAST_DESCRIPTION", "")
+          token      = os.environ["GH_TOKEN"]
+          title      = os.environ.get("PODCAST_TITLE", "Podcast")
+          link       = os.environ.get("PODCAST_LINK", "")
+          desc       = os.environ.get("PODCAST_DESCRIPTION", "")
 
+          # === GitHub API 会话 ===
           s = requests.Session()
           s.headers.update({
               "Authorization": f"Bearer {token}",
@@ -49,23 +51,28 @@ jobs:
               "X-GitHub-Api-Version": "2022-11-28"
           })
 
-          # 拉取所有 Releases
+          # === 拉取所有 Releases ===
           releases, page = [], 1
           while True:
-              r = s.get(f"https://api.github.com/repos/{owner_repo}/releases",
-                        params={"per_page":100, "page":page})
+              r = s.get(
+                  f"https://api.github.com/repos/{owner_repo}/releases",
+                  params={"per_page": 100, "page": page},
+                  timeout=30,
+              )
               r.raise_for_status()
               data = r.json()
-              if not data: break
-              releases.extend(data); page += 1
+              if not data:
+                  break
+              releases.extend(data)
+              page += 1
 
-          # 从每个 release 中收集 mp3 资产
+          # === 收集 .mp3 资产，生成 items ===
           items = []
           for rel in releases:
               pub = rel.get("published_at") or rel.get("created_at")
               if not pub:
                   continue
-              dt = datetime.datetime.fromisoformat(pub.replace("Z","+00:00"))
+              dt = datetime.datetime.fromisoformat(pub.replace("Z", "+00:00"))
               pubDate = email.utils.format_datetime(dt)
               rel_name = rel.get("name") or rel.get("tag_name") or "Episode"
 
@@ -73,22 +80,21 @@ jobs:
                   name = (a.get("name") or "")
                   if not name.lower().endswith(".mp3"):
                       continue
-                  url = a.get("browser_download_url")
+                  url    = a.get("browser_download_url")
                   length = str(a.get("size") or 0)
-                  guid = f"{rel.get('tag_name')}-{a.get('id')}-{a.get('node_id')}"
+                  guid   = f"{rel.get('tag_name')}-{a.get('id')}-{a.get('node_id')}"
                   items.append({
-                      "title": f"{rel_name} · {name}",
-                      "url": url,
+                      "title":  f"{rel_name} · {name}",
+                      "url":    url,
                       "length": length,
-                      "guid": guid,
+                      "guid":   guid,
                       "pubDate": pubDate,
-                      "dt": dt,   # 用于排序
+                      "dt":     dt,     # 用于排序
                   })
 
-          # 组装 RSS
+          # === 组装 RSS ===
           lines = []
           lines.append('<?xml version="1.0" encoding="UTF-8"?>')
-          # 加上 atom / itunes 命名空间
           lines.append('<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">')
           lines.append('  <channel>')
           lines.append(f'    <title>{html.escape(title)}</title>')
@@ -96,7 +102,45 @@ jobs:
           lines.append(f'    <description>{html.escape(desc)}</description>')
           lines.append('    <language>en-us</language>')
 
-          # 自引用 + 最近构建时间 + 缓存建议 + 基本 iTunes 字段 + 封面
+          # 自引用 + 最近构建时间 + 缓存建议 + iTunes 字段 + 封面
           self_url = (link.rstrip('/') + '/feed.xml') if link else 'feed.xml'
           now_utc_rfc = email.utils.format_datetime(datetime.datetime.utcnow())
-          lines.append(f'    <atom:link href="{html.escape(self
+          lines.append(f'    <atom:link href="{html.escape(self_url)}" rel="self" type="application/rss+xml" />')
+          lines.append(f'    <lastBuildDate>{now_utc_rfc}</lastBuildDate>')
+          lines.append('    <ttl>60</ttl>')
+          lines.append(f'    <itunes:author>{html.escape(title)}</itunes:author>')
+          lines.append(f'    <itunes:summary>{html.escape(desc)}</itunes:summary>')
+          lines.append('    <itunes:explicit>no</itunes:explicit>')
+          # ✅ 封面（PNG），注意引号写法避免 f-string 冲突
+          lines.append(f'    <itunes:image href="{link.rstrip("/")}/cover.png" />')
+
+          for it in sorted(items, key=lambda x: x["dt"], reverse=True):
+              lines.append('    <item>')
+              lines.append(f'      <title>{html.escape(it["title"])}</title>')
+              lines.append(f'      <enclosure url="{html.escape(it["url"])}" length="{it["length"]}" type="audio/mpeg" />')
+              lines.append(f'      <guid>{html.escape(it["guid"])}</guid>')
+              lines.append(f'      <pubDate>{it["pubDate"]}</pubDate>')
+              lines.append('    </item>')
+
+          lines.append('  </channel>')
+          lines.append('</rss>')
+
+          with open("docs/feed.xml", "w", encoding="utf-8") as f:
+              f.write("\n".join(lines))
+          print("feed.xml created/updated with", len(items), "items")
+          PY
+
+      # 禁用 Jekyll，确保以纯静态方式发布
+      - name: Ensure .nojekyll
+        run: |
+          mkdir -p docs
+          touch docs/.nojekyll
+
+      # 提交并推送
+      - name: Commit & push feed.xml
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: update feed.xml"
+          file_pattern: |
+            docs/feed.xml
+            docs/.nojekyll
