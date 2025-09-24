@@ -24,7 +24,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
-      # ① 规范化 MP3
+      # ① 规范化 MP3（Apple Podcasts 友好：44.1kHz / 128k CBR / mono）
       - name: Normalize MP3 for Apple Podcasts
         run: |
           mkdir -p docs/audio_norm
@@ -33,7 +33,7 @@ jobs:
             base=$(basename "$f")
             ffmpeg -y -i "$f" -ar 44100 -ac 1 -b:a 128k -codec:a libmp3lame "docs/audio_norm/$base"
           done
-          # 替换原始文件
+          # 用规范化后的文件覆盖原文件
           for f in docs/audio_norm/*.mp3; do
             base=$(basename "$f")
             mv -f "$f" "docs/audio/$base"
@@ -46,12 +46,15 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'PY'
-          import os, glob, time, subprocess, xml.sax.saxutils as xu, datetime, pathlib, json
+          import os, glob, time, subprocess, xml.sax.saxutils as xu, pathlib, json
+          from urllib.parse import quote  # 用于 URL 编码
 
           SITE_TITLE = os.getenv("PODCAST_TITLE", "QS-sci-podcast")
-          SITE_LINK  = os.getenv("PODCAST_LINK",  "https://<your-user>.github.io/<your-repo>/")  # 修改成你的 Pages 根网址
+          SITE_LINK  = "https://qstresrep.github.io/sci-podcast/"   # ← 你的 GitHub Pages 根地址
           SITE_DESC  = os.getenv("PODCAST_DESCRIPTION", "Bulk Reading!")
-          AUDIO_BASE = SITE_LINK.rstrip('/') + "/docs/audio/"
+
+          # Pages 以 docs/ 为站点根，因此 docs/audio/* 会发布在 /audio/*
+          AUDIO_BASE = SITE_LINK.rstrip('/') + "/audio/"
 
           files = sorted(glob.glob("docs/audio/*.mp3"))
 
@@ -63,9 +66,9 @@ jobs:
           items_xml = []
           for f in files:
               st = os.stat(f)
-              size = st.st_size
+              size = st.st_size  # enclosure length（字节）
               info = ffprobe_json(f)
-              dur  = float(info["format"].get("duration", 0))
+              dur  = float(info.get("format", {}).get("duration", 0))
               h = int(dur // 3600); m = int((dur % 3600) // 60); s = int(dur % 60)
               itunes_dur = f"{h:01d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
@@ -73,7 +76,9 @@ jobs:
               title = os.path.splitext(base)[0]
               pub_ts = time.gmtime(st.st_mtime)
               pub_str = time.strftime("%a, %d %b %Y %H:%M:%S +0000", pub_ts)
-              url = AUDIO_BASE + xu.quote(base)
+
+              # 用 quote 编码 URL，避免空格/特殊字符问题
+              url = AUDIO_BASE + quote(base)
 
               items_xml.append(f"""
                 <item>
@@ -86,6 +91,8 @@ jobs:
                 </item>
               """.strip())
 
+          items_joined = ''.join(items_xml) if items_xml else ""
+
           rss = f"""<?xml version="1.0" encoding="UTF-8"?>
           <rss version="2.0"
                xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
@@ -95,18 +102,30 @@ jobs:
               <description>{xu.escape(SITE_DESC)}</description>
               <language>en-us</language>
               <lastBuildDate>{time.strftime("%a, %d %b %Y %H:%M:%S +0000", time.gmtime())}</lastBuildDate>
-              {''.join(items_xml)}
+              {items_joined}
             </channel>
           </rss>
           """
           pathlib.Path("docs/feed.xml").write_text(rss, encoding="utf-8")
-          print("[OK] wrote docs/feed.xml")
+          print(f"[OK] wrote docs/feed.xml with {len(files)} item(s)")
           PY
 
-      # 提交规范化后的 mp3 和 feed.xml
+      # ③ 提交规范化后的 mp3 和 feed.xml
       - name: Commit normalized audio & feed
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add docs/audio docs/feed.xml
-          git commit -m "Normalize audio + update feed" || echo "N
+          git commit -m "Normalize audio + update feed" || echo "No changes"
+          git push
+
+      # ④ 创建 Release 并附带 mp3
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || format('v{0}', github.run_id) }}
+          name: ${{ github.event.inputs.title || 'Podcast Audio' }}
+          files: |
+            docs/audio/*.mp3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
