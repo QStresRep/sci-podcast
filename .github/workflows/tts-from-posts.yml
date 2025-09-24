@@ -15,8 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # 你选定的男女声 & 语速（也可在仓库 Actions 里改成 inputs 或 Secrets）
-      VOICE_HOST: "en-US-EmmaDragonHDLatest"   # 女声（主持人）
-      VOICE_SCI:  "en-US-AndrewMultilingua"      # 男声（科学家）
+      VOICE_HOST: "en-US-EmmaNeural"   # 女声（主持人）
+      VOICE_SCI:  "en-US-AndrewNeural"      # 男声（科学家）
       SPEED: "30%"                                 # 语速
       SPEECH_KEY: ${{ secrets.SPEECH_KEY }}
       SPEECH_REGION: ${{ secrets.SPEECH_REGION }}
