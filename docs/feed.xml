@@ -1,9 +1,15 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <rss version="2.0">
   <channel>
-    <title>我的论文播客</title>
-    <link>https://&lt;你的用户名&gt;.github.io/sci-podcast/</link>
-    <description>每天自动生成的论文摘要播客</description>
+    <title>QS-sci-podcast</title>
+    <link>https://qstresrep.github.io/sci-podcast/</link>
+    <description>Bulk Reading!</description>
     <language>en-us</language>
+    <item>
+      <title>2025-09-24 sci-podcast_test · 20250924_papertest.mp3</title>
+      <enclosure url="https://github.com/QStresRep/sci-podcast/releases/download/2025-09-24/20250924_papertest.mp3" length="6388700" type="audio/mpeg"/>
+      <guid>2025-09-24-296639507</guid>
+      <pubDate>Wed, 24 Sep 2025 03:46:41 +0000</pubDate>
+    </item>
   </channel>
 </rss>
