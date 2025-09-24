@@ -6,29 +6,17 @@
     <description>Bulk Reading!</description>
     <language>en-us</language>
     <atom:link href="https://qstresrep.github.io/sci-podcast/feed.xml" rel="self" type="application/rss+xml" />
-    <lastBuildDate>Wed, 24 Sep 2025 12:04:56 -0000</lastBuildDate>
+    <lastBuildDate>Wed, 24 Sep 2025 12:09:15 -0000</lastBuildDate>
     <ttl>60</ttl>
     <itunes:author>QS-sci-podcast</itunes:author>
     <itunes:summary>Bulk Reading!</itunes:summary>
     <itunes:explicit>no</itunes:explicit>
     <itunes:image href="https://qstresrep.github.io/sci-podcast/cover.png" />
     <item>
-      <title>2025-09-24 sci-podcast-test3 · 20250926_science-today.mp3</title>
-      <enclosure url="https://github.com/QStresRep/sci-podcast/releases/download/2025-09-24-t/20250926_science-today.mp3" length="6189601" type="audio/mpeg" />
-      <guid>2025-09-24-t-296758329-RA_kwDOP1vd_84RsCw5</guid>
-      <pubDate>Wed, 24 Sep 2025 12:04:20 +0000</pubDate>
-    </item>
-    <item>
-      <title>2025-09-24 sci-podcast_test3 · 20250924_papertest.mp3</title>
-      <enclosure url="https://github.com/QStresRep/sci-podcast/releases/download/2025-09-24/20250924_papertest.mp3" length="6388700" type="audio/mpeg" />
-      <guid>2025-09-24-296639507-RA_kwDOP1vd_84RrlwT</guid>
-      <pubDate>Wed, 24 Sep 2025 03:46:41 +0000</pubDate>
-    </item>
-    <item>
-      <title>2025-09-24 sci-podcast_test3 · 20250926_science-today.mp3</title>
+      <title>2025-09-24 test · 20250926_science-today.mp3</title>
       <enclosure url="https://github.com/QStresRep/sci-podcast/releases/download/2025-09-24/20250926_science-today.mp3" length="6189601" type="audio/mpeg" />
-      <guid>2025-09-24-296756292-RA_kwDOP1vd_84RsCRE</guid>
-      <pubDate>Wed, 24 Sep 2025 03:46:41 +0000</pubDate>
+      <guid>2025-09-24-296759521-RA_kwDOP1vd_84RsDDh</guid>
+      <pubDate>Wed, 24 Sep 2025 12:08:32 +0000</pubDate>
     </item>
   </channel>
 </rss>
