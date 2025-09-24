@@ -96,43 +96,7 @@ jobs:
           lines.append(f'    <description>{html.escape(desc)}</description>')
           lines.append('    <language>en-us</language>')
 
-          # 自引用 + 最近构建时间 + 缓存建议 + 基本 iTunes 字段
+          # 自引用 + 最近构建时间 + 缓存建议 + 基本 iTunes 字段 + 封面
           self_url = (link.rstrip('/') + '/feed.xml') if link else 'feed.xml'
           now_utc_rfc = email.utils.format_datetime(datetime.datetime.utcnow())
-          lines.append(f'    <atom:link href="{html.escape(self_url)}" rel="self" type="application/rss+xml" />')
-          lines.append(f'    <lastBuildDate>{now_utc_rfc}</lastBuildDate>')
-          lines.append('    <ttl>60</ttl>')
-          lines.append(f'    <itunes:author>{html.escape(title)}</itunes:author>')
-          lines.append(f'    <itunes:summary>{html.escape(desc)}</itunes:summary>')
-          lines.append('    <itunes:explicit>no</itunes:explicit>')
-
-          for it in sorted(items, key=lambda x: x["dt"], reverse=True):
-              lines.append('    <item>')
-              lines.append(f'      <title>{html.escape(it["title"])}</title>')
-              lines.append(f'      <enclosure url="{html.escape(it["url"])}" length="{it["length"]}" type="audio/mpeg" />')
-              lines.append(f'      <guid>{html.escape(it["guid"])}</guid>')
-              lines.append(f'      <pubDate>{it["pubDate"]}</pubDate>')
-              lines.append('    </item>')
-
-          lines.append('  </channel>')
-          lines.append('</rss>')
-
-          with open("docs/feed.xml", "w", encoding="utf-8") as f:
-              f.write("\n".join(lines))
-          print("feed.xml created/updated with", len(items), "items")
-          PY
-
-      # 禁用 Jekyll，确保以纯静态方式发布
-      - name: Ensure .nojekyll
-        run: |
-          mkdir -p docs
-          touch docs/.nojekyll
-
-      # 提交并推送
-      - name: Commit & push feed.xml
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "chore: update feed.xml"
-          file_pattern: |
-            docs/feed.xml
-            docs/.nojekyll
+          lines.append(f'    <atom:link href="{html.escape(self
