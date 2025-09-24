@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<rss version="2.0">
+  <channel>
+    <title>我的论文播客</title>
+    <link>https://&lt;你的用户名&gt;.github.io/sci-podcast/</link>
+    <description>每天自动生成的论文摘要播客</description>
+    <language>en-us</language>
+  </channel>
+</rss>
