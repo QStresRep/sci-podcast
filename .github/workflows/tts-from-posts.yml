@@ -3,8 +3,8 @@ name: TTS from TXT posts -> Release MP3
 on:
   push:
     paths:
-      - "posts/**.txt"     # 只要你往 posts/ 里上传/修改 .txt 就触发
-  workflow_dispatch:       # 可手动触发
+      - "posts/**.txt"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -13,8 +13,8 @@ jobs:
   tts:
     runs-on: ubuntu-latest
     env:
-      VOICE: "en-US-JennyNeural"   # 想改声音可改这里
-      SPEED: "0%"                  # 语速：-5% / 0% / +5% …
+      VOICE: "en-US-JennyNeural"   # 可改
+      SPEED: "0%"                  # 可改：-5% / +5%
     steps:
       - uses: actions/checkout@v4
 
@@ -23,14 +23,17 @@ jobs:
 
       - name: Collect changed TXT files
         id: changed
+        shell: bash
         run: |
-          if [ -n "${{ github.event.before }}" ]; then
-            git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep '^posts/.*\.txt$' || true
+          set -euo pipefail
+          if [ -n "${{ github.event.before || '' }}" ]; then
+            git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep -E '^posts/.*\.txt$' || true
           fi > changed.txt
           if [ ! -s changed.txt ]; then
             ls posts/*.txt 2>/dev/null || true > changed.txt
           fi
-          echo "Changed files:"; cat changed.txt || true
+          echo "Changed files:"
+          cat changed.txt || true
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -42,13 +45,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install azure-cognitiveservices-speech==1.37.0
 
-      - name: Synthesize MP3 with Azure TTS
+      - name: Synthesize MP3 with Azure TTS (debug on)
+        id: tts
         env:
           SPEECH_KEY: ${{ secrets.SPEECH_KEY }}
           SPEECH_REGION: ${{ secrets.SPEECH_REGION }}
           VOICE: ${{ env.VOICE }}
           SPEED: ${{ env.SPEED }}
+        shell: bash
         run: |
+          set -euo pipefail
+          echo "Using region: ${SPEECH_REGION:-<unset>}"
+          echo "Voice: ${VOICE}, Speed: ${SPEED}"
+
           python - <<'PY'
           import os, re, html, datetime, pathlib, sys
           import azure.cognitiveservices.speech as speechsdk
@@ -74,50 +83,72 @@ jobs:
                   raise SystemExit(f"TTS failed: {result.reason}")
 
           out_dir = pathlib.Path("tts_out"); out_dir.mkdir(exist_ok=True)
+          changed = pathlib.Path("changed.txt")
+          files = changed.read_text(encoding="utf-8").splitlines() if changed.exists() else []
           processed = 0
-          files = []
-          if os.path.exists("changed.txt"):
-              with open("changed.txt","r") as f:
-                  files = [ln.strip() for ln in f if ln.strip()]
+
           for fp in files:
+              if not fp or not fp.endswith(".txt"): 
+                  continue
               try:
-                  with open(fp, "r", encoding="utf-8") as rf:
-                      lines = rf.read().splitlines()
-                  if not lines: 
+                  p = pathlib.Path(fp)
+                  if not p.exists():
+                      print(f"[SKIP] not found: {fp}")
                       continue
-                  title = lines[0].strip() or "Episode"
+                  raw = p.read_text(encoding="utf-8").splitlines()
+                  if len(raw) < 3:
+                      print(f"[WARN] body too short (need >=3 lines: title/date/body): {fp}")
+                      continue
+                  title = (raw[0] or "Episode").strip()
                   date = None
-                  if len(lines) >= 2 and lines[1].lower().startswith("date:"):
-                      date = lines[1].split(":",1)[1].strip()
+                  if raw[1].lower().startswith("date:"):
+                      date = raw[1].split(":",1)[1].strip()
                   if not date:
                       date = datetime.date.today().isoformat()
-                  text = "\n".join(lines[2:]).strip() if len(lines) > 2 else ""
-                  if not text:
-                      print(f"[WARN] Empty body: {fp}"); continue
+                  body = "\n".join(raw[2:]).strip()
+                  if not body or len(body) < 40:
+                      print(f"[WARN] empty/short body: {fp} (len={len(body)})")
+                      continue
+
                   fn = f"{date.replace('-','')}_{slugify(title)}.mp3"
                   out_path = out_dir / fn
-                  voice = os.getenv("VOICE", "en-US-JennyNeural")
-                  speed = os.getenv("SPEED", "0%")
-                  print(f"[TTS] {fp} -> {out_path} ({voice}, {speed})")
-                  synth(text, str(out_path), voice, speed)
+                  print(f"[TTS] {fp} -> {out_path}")
+                  synth(body, str(out_path), os.getenv("VOICE","en-US-JennyNeural"), os.getenv("SPEED","0%"))
+                  print(f"[OK] wrote {out_path} ({out_path.stat().st_size} bytes)")
                   processed += 1
               except Exception as e:
                   print(f"[ERROR] {fp}: {e}")
+
+          # 输出给后续步骤判断
+          with open(os.environ["GITHUB_OUTPUT"], "a") as gh:
+              gh.write(f"count={processed}\n")
+
           if processed == 0:
-              print("No MP3 generated."); sys.exit(0)
-          print(f"[OK] Generated {processed} MP3 file(s) in {out_dir}")
+              print("No MP3 generated. Please check: 1) posts/*.txt format; 2) SPEECH_REGION code; 3) Speech quota.")
+              sys.exit(1)  # 没产物就报错，方便你在 UI 里看到红色
           PY
 
+      - name: Upload MP3s as workflow artifact (for debugging)
+        if: steps.tts.outputs.count != '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tts_out
+          path: tts_out/*.mp3
+
       - name: Install GitHub CLI
+        if: steps.tts.outputs.count != '0'
         run: |
           gh --version || (type -p apt && sudo apt-get update && sudo apt-get install -y gh)
 
-      - name: Upload MP3s to a Release (tag=YYYY-MM-DD)
+      - name: Create/Update Release (tag=YYYY-MM-DD) and upload MP3
+        if: steps.tts.outputs.count != '0'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
+          set -euo pipefail
           TODAY=$(date -u +%F)
-          gh auth status || echo "${GH_TOKEN}" | gh auth login --with-token
+          echo "${GH_TOKEN}" | gh auth login --with-token
           gh release view "$TODAY" >/dev/null 2>&1 || gh release create "$TODAY" --title "$TODAY" --notes "Daily TTS upload for $TODAY"
           for f in tts_out/*.mp3; do
             [ -e "$f" ] || continue
