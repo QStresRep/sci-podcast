@@ -1,14 +1,23 @@
-name: TTS from posts
+name: TTS + Auto Release
 
 on:
+  # 手动触发时可自定义 tag / 标题
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v2025.09.26)'
+        required: false
+      title:
+        description: 'Release title'
+        required: false
+  # 也可在 posts/*.txt 变更时自动触发
   push:
     paths:
       - "posts/*.txt"
       - ".github/workflows/tts-from-posts.yml"
 
 permissions:
-  contents: write
+  contents: write  # 创建 Release 需要
 
 jobs:
   tts:
@@ -16,14 +25,13 @@ jobs:
     env:
       VOICE: en-US-JennyNeural
       SPEED: 0%
-      # 下面两个一定要在 GitHub 仓库 Settings → Secrets and variables → Actions 里设置
       SPEECH_KEY: ${{ secrets.SPEECH_KEY }}
       SPEECH_REGION: ${{ secrets.SPEECH_REGION }}
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Use Python 3.11
+      - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -33,14 +41,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install azure-cognitiveservices-speech
 
-      - name: Debug files
+      - name: Debug posts
         run: |
           echo "List posts/:"
           ls -la posts/ || true
-          echo "Show changed.txt if present:"
-          cat changed.txt || echo "(no changed.txt)"
 
-      - name: Build TTS
+      - name: Build TTS (to tts_out/*.mp3)
         shell: bash
         run: |
           set -euo pipefail
@@ -76,24 +82,21 @@ jobs:
                   raise SystemExit(f"TTS failed: {result.reason}")
 
           out_dir = pathlib.Path("tts_out"); out_dir.mkdir(exist_ok=True)
-          files = []
 
-          # 优先使用 changed.txt（若你有生成它）
-          changed_file = pathlib.Path("changed.txt")
-          if changed_file.exists():
-              raw = [l.strip() for l in changed_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+          # 优先 changed.txt；否则扫描 posts/*.txt
+          files = []
+          changed = pathlib.Path("changed.txt")
+          if changed.exists():
+              raw = [l.strip() for l in changed.read_text(encoding="utf-8").splitlines() if l.strip()]
               files = [f for f in raw if f.endswith(".txt")]
               print(f"[INFO] changed.txt entries: {len(raw)}, txt after filter: {len(files)}")
-          else:
-              print("[INFO] changed.txt not found, fallback to posts/*.txt")
-
-          # Fallback: 扫描 posts/*.txt
           if not files:
+              import glob
               files = sorted(glob.glob("posts/*.txt"))
               print(f"[INFO] fallback posts/*.txt -> {len(files)} files")
 
           if not files:
-              print("[ERROR] No candidate .txt files. Put files under posts/.")
+              print("[ERROR] No candidate .txt files under posts/.")
               with open(os.environ["GITHUB_OUTPUT"], "a") as gh:
                   gh.write("count=0\n")
               sys.exit(1)
@@ -133,15 +136,36 @@ jobs:
               gh.write(f"count={processed}\n")
 
           if processed == 0:
-              print("No MP3 generated. Check: posts/*.txt format; region/voice; quota.")
+              print("No MP3 generated. Check posts format / region / quota.")
               sys.exit(1)
           PY
 
-      # （可选）把生成的 MP3 上传为工作流产物，方便下载/调试
       - name: Upload mp3 artifacts
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: tts_out
           path: tts_out/*.mp3
-          if-no-files-found: warn
+          if-no-files-found: error
+
+  release:
+    runs-on: ubuntu-latest
+    needs: tts
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: tts_out
+          path: dist
+
+      - name: List files to release
+        run: ls -la dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || format('v{0}', github.run_id) }}
+          name: ${{ github.event.inputs.title || 'Podcast Audio' }}
+          files: |
+            dist/*.mp3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
