@@ -1,0 +1,126 @@
+name: TTS from TXT posts -> Release MP3
+
+on:
+  push:
+    paths:
+      - "posts/**.txt"     # 只要你往 posts/ 里上传/修改 .txt 就触发
+  workflow_dispatch:       # 可手动触发
+
+permissions:
+  contents: write
+
+jobs:
+  tts:
+    runs-on: ubuntu-latest
+    env:
+      VOICE: "en-US-JennyNeural"   # 想改声音可改这里
+      SPEED: "0%"                  # 语速：-5% / 0% / +5% …
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure posts dir exists
+        run: mkdir -p posts
+
+      - name: Collect changed TXT files
+        id: changed
+        run: |
+          if [ -n "${{ github.event.before }}" ]; then
+            git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep '^posts/.*\.txt$' || true
+          fi > changed.txt
+          if [ ! -s changed.txt ]; then
+            ls posts/*.txt 2>/dev/null || true > changed.txt
+          fi
+          echo "Changed files:"; cat changed.txt || true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install azure-cognitiveservices-speech==1.37.0
+
+      - name: Synthesize MP3 with Azure TTS
+        env:
+          SPEECH_KEY: ${{ secrets.SPEECH_KEY }}
+          SPEECH_REGION: ${{ secrets.SPEECH_REGION }}
+          VOICE: ${{ env.VOICE }}
+          SPEED: ${{ env.SPEED }}
+        run: |
+          python - <<'PY'
+          import os, re, html, datetime, pathlib, sys
+          import azure.cognitiveservices.speech as speechsdk
+
+          def slugify(s: str) -> str:
+              s = s.strip().lower().replace(" ", "-")
+              return re.sub(r'[^a-z0-9_-]+', '-', s)[:80].strip('-') or "episode"
+
+          def synth(text: str, out_path: str, voice: str, speed: str):
+              key = os.getenv("SPEECH_KEY"); region = os.getenv("SPEECH_REGION")
+              if not key or not region:
+                  raise SystemExit("Missing SPEECH_KEY / SPEECH_REGION secrets.")
+              speech_config = speechsdk.SpeechConfig(subscription=key, region=region)
+              audio_config = speechsdk.audio.AudioOutputConfig(filename=out_path)
+              ssml = f'''<speak version="1.0" xml:lang="en-US">
+                <voice name="{voice}">
+                  <prosody rate="{speed}">{html.escape(text)}</prosody>
+                </voice>
+              </speak>'''
+              synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=audio_config)
+              result = synthesizer.speak_ssml_async(ssml).get()
+              if result.reason != speechsdk.ResultReason.SynthesizingAudioCompleted:
+                  raise SystemExit(f"TTS failed: {result.reason}")
+
+          out_dir = pathlib.Path("tts_out"); out_dir.mkdir(exist_ok=True)
+          processed = 0
+          files = []
+          if os.path.exists("changed.txt"):
+              with open("changed.txt","r") as f:
+                  files = [ln.strip() for ln in f if ln.strip()]
+          for fp in files:
+              try:
+                  with open(fp, "r", encoding="utf-8") as rf:
+                      lines = rf.read().splitlines()
+                  if not lines: 
+                      continue
+                  title = lines[0].strip() or "Episode"
+                  date = None
+                  if len(lines) >= 2 and lines[1].lower().startswith("date:"):
+                      date = lines[1].split(":",1)[1].strip()
+                  if not date:
+                      date = datetime.date.today().isoformat()
+                  text = "\n".join(lines[2:]).strip() if len(lines) > 2 else ""
+                  if not text:
+                      print(f"[WARN] Empty body: {fp}"); continue
+                  fn = f"{date.replace('-','')}_{slugify(title)}.mp3"
+                  out_path = out_dir / fn
+                  voice = os.getenv("VOICE", "en-US-JennyNeural")
+                  speed = os.getenv("SPEED", "0%")
+                  print(f"[TTS] {fp} -> {out_path} ({voice}, {speed})")
+                  synth(text, str(out_path), voice, speed)
+                  processed += 1
+              except Exception as e:
+                  print(f"[ERROR] {fp}: {e}")
+          if processed == 0:
+              print("No MP3 generated."); sys.exit(0)
+          print(f"[OK] Generated {processed} MP3 file(s) in {out_dir}")
+          PY
+
+      - name: Install GitHub CLI
+        run: |
+          gh --version || (type -p apt && sudo apt-get update && sudo apt-get install -y gh)
+
+      - name: Upload MP3s to a Release (tag=YYYY-MM-DD)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TODAY=$(date -u +%F)
+          gh auth status || echo "${GH_TOKEN}" | gh auth login --with-token
+          gh release view "$TODAY" >/dev/null 2>&1 || gh release create "$TODAY" --title "$TODAY" --notes "Daily TTS upload for $TODAY"
+          for f in tts_out/*.mp3; do
+            [ -e "$f" ] || continue
+            echo "Uploading $f ..."
+            gh release upload "$TODAY" "$f" --clobber
+          done
