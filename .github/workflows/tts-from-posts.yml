@@ -1,10 +1,11 @@
-name: TTS from TXT posts -> Release MP3
+name: TTS from posts
 
 on:
+  workflow_dispatch:
   push:
     paths:
-      - "posts/**.txt"
-  workflow_dispatch:
+      - "posts/*.txt"
+      - ".github/workflows/tts-from-posts.yml"
 
 permissions:
   contents: write
@@ -13,45 +14,33 @@ jobs:
   tts:
     runs-on: ubuntu-latest
     env:
-      VOICE: "en-US-JennyNeural"   # 可改
-      SPEED: "0%"                  # 可改：-5% / +5%
+      VOICE: en-US-JennyNeural
+      SPEED: 0%
+      # 下面两个一定要在 GitHub 仓库 Settings → Secrets and variables → Actions 里设置
+      SPEECH_KEY: ${{ secrets.SPEECH_KEY }}
+      SPEECH_REGION: ${{ secrets.SPEECH_REGION }}
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Ensure posts dir exists
-        run: mkdir -p posts
-
-      - name: Collect changed TXT files
-        id: changed
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -n "${{ github.event.before || '' }}" ]; then
-            git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep -E '^posts/.*\.txt$' || true
-          fi > changed.txt
-          if [ ! -s changed.txt ]; then
-            ls posts/*.txt 2>/dev/null || true > changed.txt
-          fi
-          echo "Changed files:"
-          cat changed.txt || true
-
-      - name: Setup Python
+      - name: Use Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: "3.11"
 
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install azure-cognitiveservices-speech==1.37.0
+          pip install azure-cognitiveservices-speech
 
-      - name: Synthesize MP3 with Azure TTS (debug on)
-        id: tts
-        env:
-          SPEECH_KEY: ${{ secrets.SPEECH_KEY }}
-          SPEECH_REGION: ${{ secrets.SPEECH_REGION }}
-          VOICE: ${{ env.VOICE }}
-          SPEED: ${{ env.SPEED }}
+      - name: Debug files
+        run: |
+          echo "List posts/:"
+          ls -la posts/ || true
+          echo "Show changed.txt if present:"
+          cat changed.txt || echo "(no changed.txt)"
+
+      - name: Build TTS
         shell: bash
         run: |
           set -euo pipefail
@@ -59,8 +48,12 @@ jobs:
           echo "Voice: ${VOICE}, Speed: ${SPEED}"
 
           python - <<'PY'
-          import os, re, html, datetime, pathlib, sys
-          import azure.cognitiveservices.speech as speechsdk
+          import os, re, html, datetime, pathlib, sys, glob
+          try:
+              import azure.cognitiveservices.speech as speechsdk
+          except Exception as e:
+              print("[FATAL] Cannot import azure-cognitiveservices-speech:", e)
+              sys.exit(2)
 
           def slugify(s: str) -> str:
               s = s.strip().lower().replace(" ", "-")
@@ -83,75 +76,72 @@ jobs:
                   raise SystemExit(f"TTS failed: {result.reason}")
 
           out_dir = pathlib.Path("tts_out"); out_dir.mkdir(exist_ok=True)
-          changed = pathlib.Path("changed.txt")
-          files = changed.read_text(encoding="utf-8").splitlines() if changed.exists() else []
+          files = []
+
+          # 优先使用 changed.txt（若你有生成它）
+          changed_file = pathlib.Path("changed.txt")
+          if changed_file.exists():
+              raw = [l.strip() for l in changed_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+              files = [f for f in raw if f.endswith(".txt")]
+              print(f"[INFO] changed.txt entries: {len(raw)}, txt after filter: {len(files)}")
+          else:
+              print("[INFO] changed.txt not found, fallback to posts/*.txt")
+
+          # Fallback: 扫描 posts/*.txt
+          if not files:
+              files = sorted(glob.glob("posts/*.txt"))
+              print(f"[INFO] fallback posts/*.txt -> {len(files)} files")
+
+          if not files:
+              print("[ERROR] No candidate .txt files. Put files under posts/.")
+              with open(os.environ["GITHUB_OUTPUT"], "a") as gh:
+                  gh.write("count=0\n")
+              sys.exit(1)
+
           processed = 0
-
           for fp in files:
-              if not fp or not fp.endswith(".txt"): 
+              p = pathlib.Path(fp)
+              if not p.exists():
+                  print(f"[SKIP] not found: {fp}")
                   continue
-              try:
-                  p = pathlib.Path(fp)
-                  if not p.exists():
-                      print(f"[SKIP] not found: {fp}")
-                      continue
-                  raw = p.read_text(encoding="utf-8").splitlines()
-                  if len(raw) < 3:
-                      print(f"[WARN] body too short (need >=3 lines: title/date/body): {fp}")
-                      continue
-                  title = (raw[0] or "Episode").strip()
-                  date = None
-                  if raw[1].lower().startswith("date:"):
-                      date = raw[1].split(":",1)[1].strip()
-                  if not date:
-                      date = datetime.date.today().isoformat()
-                  body = "\n".join(raw[2:]).strip()
-                  if not body or len(body) < 40:
-                      print(f"[WARN] empty/short body: {fp} (len={len(body)})")
-                      continue
+              raw = p.read_text(encoding="utf-8").splitlines()
+              if len(raw) < 3:
+                  print(f"[WARN] need >=3 lines (title/date/body): {fp}")
+                  continue
+              title = (raw[0] or "Episode").strip()
+              date = None
+              if raw[1].lower().startswith("date:"):
+                  date = raw[1].split(":",1)[1].strip()
+              if not date:
+                  date = datetime.date.today().isoformat()
+              body = "\n".join(raw[2:]).strip()
+              if not body or len(body) < 40:
+                  print(f"[WARN] body too short: {fp} (len={len(body)})")
+                  continue
 
-                  fn = f"{date.replace('-','')}_{slugify(title)}.mp3"
-                  out_path = out_dir / fn
-                  print(f"[TTS] {fp} -> {out_path}")
+              fn = f"{date.replace('-','')}_{slugify(title)}.mp3"
+              out_path = out_dir / fn
+              print(f"[TTS] {fp} -> {out_path}")
+              try:
                   synth(body, str(out_path), os.getenv("VOICE","en-US-JennyNeural"), os.getenv("SPEED","0%"))
                   print(f"[OK] wrote {out_path} ({out_path.stat().st_size} bytes)")
                   processed += 1
               except Exception as e:
                   print(f"[ERROR] {fp}: {e}")
 
-          # 输出给后续步骤判断
           with open(os.environ["GITHUB_OUTPUT"], "a") as gh:
               gh.write(f"count={processed}\n")
 
           if processed == 0:
-              print("No MP3 generated. Please check: 1) posts/*.txt format; 2) SPEECH_REGION code; 3) Speech quota.")
-              sys.exit(1)  # 没产物就报错，方便你在 UI 里看到红色
+              print("No MP3 generated. Check: posts/*.txt format; region/voice; quota.")
+              sys.exit(1)
           PY
 
-      - name: Upload MP3s as workflow artifact (for debugging)
-        if: steps.tts.outputs.count != '0'
+      # （可选）把生成的 MP3 上传为工作流产物，方便下载/调试
+      - name: Upload mp3 artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: tts_out
           path: tts_out/*.mp3
-
-      - name: Install GitHub CLI
-        if: steps.tts.outputs.count != '0'
-        run: |
-          gh --version || (type -p apt && sudo apt-get update && sudo apt-get install -y gh)
-
-      - name: Create/Update Release (tag=YYYY-MM-DD) and upload MP3
-        if: steps.tts.outputs.count != '0'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          TODAY=$(date -u +%F)
-          echo "${GH_TOKEN}" | gh auth login --with-token
-          gh release view "$TODAY" >/dev/null 2>&1 || gh release create "$TODAY" --title "$TODAY" --notes "Daily TTS upload for $TODAY"
-          for f in tts_out/*.mp3; do
-            [ -e "$f" ] || continue
-            echo "Uploading $f ..."
-            gh release upload "$TODAY" "$f" --clobber
-          done
+          if-no-files-found: warn
