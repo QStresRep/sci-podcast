@@ -1,0 +1,39 @@
+name: Release Podcast Audio
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v2025.09.26)'
+        required: false
+      title:
+        description: 'Release title'
+        required: false
+      glob:
+        description: 'Files to attach (glob)'
+        required: false
+        default: 'docs/audio/*.mp3'   # 这里已改为 docs/audio/*.mp3
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: List files to attach (for debug)
+        run: |
+          echo "Using glob: ${{ github.event.inputs.glob || 'docs/audio/*.mp3' }}"
+          ls -la ${{ github.event.inputs.glob || 'docs/audio/*.mp3' }} || true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || format('v{0}', github.run_id) }}
+          name: ${{ github.event.inputs.title || 'Podcast Audio' }}
+          files: |
+            ${{ github.event.inputs.glob || 'docs/audio/*.mp3' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
