@@ -1,12 +1,7 @@
 Science Today
 Date: 2025-09-26
-Paper Title: Comprehensive evaluation of plasma tau biomarkers for detecting and monitoring Alzheimer’s disease in a multicenter and multiethnic aging population
-Journal: Nature Aging, Volume 5, August 2025
-Publication Date: Published online 23 June 2025
-First Author: [List of multiple contributors; main first listed in article]
-Corresponding Authors: Kaj Blennow (University of Gothenburg), Fang Xie (Fudan University), Tengfei Guo (Shenzhen Bay Laboratory)
 Host:
-Welcome to today’s episode. We’re diving into a fascinating paper just published in Nature Aging, which takes a deep look at plasma tau biomarkers and their role in diagnosing and tracking Alzheimer’s disease. With me is one of the lead scientists from the study. Thank you for joining us. To start off: why is this research important right now?
+Welcome to today’s episode. We’re diving into a fascinating new study published in Nature Aging. The paper is titled “Comprehensive evaluation of plasma tau biomarkers for detecting and monitoring Alzheimer’s disease in a multicenter and multiethnic aging population.” It appears in Nature Aging, Volume 5, August 2025, and was published online on June 23, 2025. The work is a collaborative effort with multiple contributors, led by first author [insert first-listed name here], and guided by corresponding authors Kaj Blennow from the University of Gothenburg, Fang Xie from Fudan University, and Tengfei Guo from Shenzhen Bay Laboratory. This study takes a deep look at plasma tau biomarkers and their role in diagnosing and tracking Alzheimer’s disease across diverse populations. With me today is one of the lead scientists from the study. Thank you for joining us. To start off—why is this research important right now?
 Scientist:
 Thank you for having me. Alzheimer’s disease is a major global health challenge, with more than 55 million people affected by dementia worldwide, and China alone accounting for about a quarter of all cases. Many patients in Asia, especially China, remain untreated due to low awareness and high costs of diagnostic tests like PET scans or cerebrospinal fluid (CSF) analysis. As new disease-modifying drugs become available, we need accurate, affordable, and scalable biomarkers to identify who will benefit most. That’s where blood-based tau biomarkers come in. They offer a simple, noninvasive way to detect the disease much earlier and at lower cost.
 Host:
