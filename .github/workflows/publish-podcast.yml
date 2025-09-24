@@ -1,0 +1,112 @@
+name: Publish Podcast (normalize + feed + release)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v2025.09.26)'
+        required: false
+      title:
+        description: 'Release title'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      # ① 规范化 MP3
+      - name: Normalize MP3 for Apple Podcasts
+        run: |
+          mkdir -p docs/audio_norm
+          shopt -s nullglob
+          for f in docs/audio/*.mp3; do
+            base=$(basename "$f")
+            ffmpeg -y -i "$f" -ar 44100 -ac 1 -b:a 128k -codec:a libmp3lame "docs/audio_norm/$base"
+          done
+          # 替换原始文件
+          for f in docs/audio_norm/*.mp3; do
+            base=$(basename "$f")
+            mv -f "$f" "docs/audio/$base"
+          done
+          rmdir docs/audio_norm || true
+
+      # ② 生成 RSS feed.xml
+      - name: Generate docs/feed.xml
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, glob, time, subprocess, xml.sax.saxutils as xu, datetime, pathlib, json
+
+          SITE_TITLE = os.getenv("PODCAST_TITLE", "QS-sci-podcast")
+          SITE_LINK  = os.getenv("PODCAST_LINK",  "https://<your-user>.github.io/<your-repo>/")  # 修改成你的 Pages 根网址
+          SITE_DESC  = os.getenv("PODCAST_DESCRIPTION", "Bulk Reading!")
+          AUDIO_BASE = SITE_LINK.rstrip('/') + "/docs/audio/"
+
+          files = sorted(glob.glob("docs/audio/*.mp3"))
+
+          def ffprobe_json(path):
+              cmd = ["ffprobe", "-v", "error", "-print_format", "json", "-show_format", path]
+              out = subprocess.check_output(cmd, text=True)
+              return json.loads(out)
+
+          items_xml = []
+          for f in files:
+              st = os.stat(f)
+              size = st.st_size
+              info = ffprobe_json(f)
+              dur  = float(info["format"].get("duration", 0))
+              h = int(dur // 3600); m = int((dur % 3600) // 60); s = int(dur % 60)
+              itunes_dur = f"{h:01d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+              base = os.path.basename(f)
+              title = os.path.splitext(base)[0]
+              pub_ts = time.gmtime(st.st_mtime)
+              pub_str = time.strftime("%a, %d %b %Y %H:%M:%S +0000", pub_ts)
+              url = AUDIO_BASE + xu.quote(base)
+
+              items_xml.append(f"""
+                <item>
+                  <title>{xu.escape(title)}</title>
+                  <description>{xu.escape(title)}</description>
+                  <enclosure url="{url}" length="{size}" type="audio/mpeg" />
+                  <guid isPermaLink="false">{xu.escape(url)}</guid>
+                  <pubDate>{pub_str}</pubDate>
+                  <itunes:duration>{itunes_dur}</itunes:duration>
+                </item>
+              """.strip())
+
+          rss = f"""<?xml version="1.0" encoding="UTF-8"?>
+          <rss version="2.0"
+               xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
+            <channel>
+              <title>{xu.escape(SITE_TITLE)}</title>
+              <link>{xu.escape(SITE_LINK)}</link>
+              <description>{xu.escape(SITE_DESC)}</description>
+              <language>en-us</language>
+              <lastBuildDate>{time.strftime("%a, %d %b %Y %H:%M:%S +0000", time.gmtime())}</lastBuildDate>
+              {''.join(items_xml)}
+            </channel>
+          </rss>
+          """
+          pathlib.Path("docs/feed.xml").write_text(rss, encoding="utf-8")
+          print("[OK] wrote docs/feed.xml")
+          PY
+
+      # 提交规范化后的 mp3 和 feed.xml
+      - name: Commit normalized audio & feed
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add docs/audio docs/feed.xml
+          git commit -m "Normalize audio + update feed" || echo "N
