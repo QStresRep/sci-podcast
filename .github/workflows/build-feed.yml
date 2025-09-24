@@ -2,7 +2,7 @@ name: Build RSS feed from Releases
 
 on:
   schedule:
-    - cron: '0 0 * * *'     # 每天 00:00 UTC 运行（UTC+8=08:00，本地早8点自动更新）
+    - cron: '0 0 * * *'     # 每天 00:00 UTC 运行（UTC+8=08:00）
   release:
     types: [published]       # 发布 Release 时自动运行
   workflow_dispatch:         # 需要时可手动触发
@@ -14,12 +14,19 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      PODCAST_TITLE: "我的论文播客"
-      PODCAST_LINK: "https://<你的用户名>.github.io/sci-podcast/"
-      PODCAST_DESCRIPTION: "每天自动生成的论文摘要播客"
+      PODCAST_TITLE: "QS-sci-podcast"
+      PODCAST_LINK: "https://qstresrep.github.io/sci-podcast/"
+      PODCAST_DESCRIPTION: "Bulk Reading!"
     steps:
       - uses: actions/checkout@v4
 
+      # ✅ 安装 Python 和 requests（必需）
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - run: pip install requests
+
+      # 生成 feed.xml
       - name: Generate feed.xml from releases
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -53,6 +60,8 @@ jobs:
           items = []
           for rel in releases:
               pub = rel.get("published_at") or rel.get("created_at")
+              if not pub: 
+                  continue
               dt = datetime.datetime.fromisoformat(pub.replace("Z","+00:00"))
               pubDate = email.utils.format_datetime(dt)
               rel_name = rel.get("name") or rel.get("tag_name") or "Episode"
@@ -71,6 +80,7 @@ jobs:
                       "pubDate": pubDate
                   })
 
+          # 没有条目也写出最小合法 RSS，避免 404
           lines = []
           lines.append('<?xml version="1.0" encoding="UTF-8" ?>')
           lines.append('<rss version="2.0">')
@@ -90,11 +100,20 @@ jobs:
           lines.append('</rss>')
           with open("docs/feed.xml","w",encoding="utf-8") as f:
               f.write("\n".join(lines))
-          print("feed.xml created.")
+          print("feed.xml created / updated.")
           PY
 
+      # ✅ 禁用 Jekyll，确保直接把 docs/ 当静态目录
+      - name: Ensure .nojekyll
+        run: |
+          mkdir -p docs
+          touch docs/.nojekyll
+
+      # 提交更新
       - name: Commit & push feed.xml
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "chore: update feed.xml"
-          file_pattern: docs/feed.xml
+          file_pattern: |
+            docs/feed.xml
+            docs/.nojekyll
