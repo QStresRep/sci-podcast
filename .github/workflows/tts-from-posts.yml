@@ -1,4 +1,4 @@
-name: TTS + Commit to Repo
+name: TTS + Commit to Repo (Dialog SSML)
 
 on:
   workflow_dispatch:
@@ -14,8 +14,10 @@ jobs:
   tts:
     runs-on: ubuntu-latest
     env:
-      VOICE: en-US-JennyNeural
-      SPEED: 0%
+      # 你选定的男女声 & 语速（也可在仓库 Actions 里改成 inputs 或 Secrets）
+      VOICE_HOST: "en-US-Emma Dragon HD Latest"   # 女声（主持人）
+      VOICE_SCI:  "en-US-Andrew Multilingua"      # 男声（科学家）
+      SPEED: "30%"                                 # 语速
       SPEECH_KEY: ${{ secrets.SPEECH_KEY }}
       SPEECH_REGION: ${{ secrets.SPEECH_REGION }}
 
@@ -32,28 +34,83 @@ jobs:
           python -m pip install --upgrade pip
           pip install azure-cognitiveservices-speech
 
-      - name: Build TTS (to tts_out/*.mp3)
+      - name: Build TTS to tts_out/*.mp3 (dialog voices, ignore labels)
+        shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
           import os, re, html, datetime, pathlib, sys, glob
           import azure.cognitiveservices.speech as speechsdk
 
+          VOICE_HOST = os.getenv("VOICE_HOST", "en-US-Emma Dragon HD Latest")
+          VOICE_SCI  = os.getenv("VOICE_SCI",  "en-US-Andrew Multilingua")
+          RATE       = os.getenv("SPEED", "30%")
+
+          role_pat = re.compile(r'^(host|scientist)\s*:\s*(.+)$', re.I)
+
           def slugify(s: str) -> str:
               s = s.strip().lower().replace(" ", "-")
               return re.sub(r'[^a-z0-9_-]+', '-', s)[:80].strip('-') or "episode"
 
-          def synth(text: str, out_path: str, voice: str, speed: str):
+          def build_dialog_ssml(text: str) -> str:
+              lines = [l.rstrip() for l in text.splitlines() if l.strip()]
+              chunks = []
+              for ln in lines:
+                  m = role_pat.match(ln)
+                  if m:
+                      role = m.group(1).lower()
+                      content = m.group(2).strip()
+                      voice = VOICE_HOST if role == "host" else VOICE_SCI
+                  else:
+                      voice = VOICE_HOST
+                      content = ln
+
+                  sentences = re.split(r'([。！？?!])', content)
+                  segs = []
+                  for i in range(0, len(sentences), 2):
+                      seg = sentences[i].strip()
+                      if not seg: continue
+                      tail = sentences[i+1] if i+1 < len(sentences) else ""
+                      segs.append(seg + tail)
+
+                  if not segs: 
+                      continue
+
+                  inner = "".join(
+                      f"<s>{html.escape(seg)}</s><break time='250ms'/>"
+                      for seg in segs
+                  )
+
+                  chunks.append(
+                      f"""<voice name="{voice}">
+                             <mstts:express-as style="narration-professional" styledegree="1.2">
+                               <prosody rate="{RATE}">{inner}</prosody>
+                             </mstts:express-as>
+                          </voice>"""
+                  )
+
+              if not chunks:
+                  chunks.append(
+                      f"""<voice name="{VOICE_HOST}">
+                             <prosody rate="{RATE}">{html.escape(text)}</prosody>
+                          </voice>"""
+                  )
+
+              return f"""<speak version="1.0" xml:lang="en-US"
+                        xmlns:mstts="https://www.w3.org/2001/mstts">
+                        {''.join(chunks)}
+                      </speak>"""
+
+          def synth_ssml(ssml: str, out_path: str):
               key = os.getenv("SPEECH_KEY"); region = os.getenv("SPEECH_REGION")
               if not key or not region:
                   raise SystemExit("Missing SPEECH_KEY / SPEECH_REGION secrets.")
               speech_config = speechsdk.SpeechConfig(subscription=key, region=region)
+              # 先用较高质量的 MP3 输出（后续再用 ffmpeg 规范化为 44.1k CBR）
+              speech_config.set_speech_synthesis_output_format(
+                  speechsdk.SpeechSynthesisOutputFormat.Audio48Khz192KBitRateMonoMp3
+              )
               audio_config = speechsdk.audio.AudioOutputConfig(filename=out_path)
-              ssml = f'''<speak version="1.0" xml:lang="en-US">
-                <voice name="{voice}">
-                  <prosody rate="{speed}">{html.escape(text)}</prosody>
-                </voice>
-              </speak>'''
               synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=audio_config)
               result = synthesizer.speak_ssml_async(ssml).get()
               if result.reason != speechsdk.ResultReason.SynthesizingAudioCompleted:
@@ -69,21 +126,29 @@ jobs:
           for fp in files:
               p = pathlib.Path(fp)
               raw = p.read_text(encoding="utf-8").splitlines()
-              if len(raw) < 3: continue
+              if len(raw) < 3:
+                  print(f"[WARN] too short: {fp}")
+                  continue
+
               title = (raw[0] or "Episode").strip()
               date = None
               if raw[1].lower().startswith("date:"):
                   date = raw[1].split(":",1)[1].strip()
               if not date:
                   date = datetime.date.today().isoformat()
+
               body = "\n".join(raw[2:]).strip()
-              if not body or len(body) < 40: continue
+              if len(body) < 20:
+                  print(f"[WARN] body short: {fp}")
+                  continue
 
               fn = f"{date.replace('-','')}_{slugify(title)}.mp3"
               out_path = out_dir / fn
               print(f"[TTS] {fp} -> {out_path}")
-              synth(body, str(out_path), os.getenv("VOICE","en-US-JennyNeural"), os.getenv("SPEED","0%"))
-              print(f"[OK] wrote {out_path}")
+
+              ssml = build_dialog_ssml(body)
+              synth_ssml(ssml, str(out_path))
+              print(f"[OK] wrote {out_path} ({out_path.stat().st_size} bytes)")
               processed += 1
 
           if processed == 0:
@@ -91,12 +156,20 @@ jobs:
               sys.exit(1)
           PY
 
+      - name: Normalize MP3 for Apple Podcasts (44.1kHz / 128kbps CBR / mono)
+        run: |
+          sudo apt-get update && sudo apt-get install -y ffmpeg
+          mkdir -p docs/audio
+          shopt -s nullglob
+          for f in tts_out/*.mp3; do
+            base=$(basename "$f")
+            ffmpeg -y -i "$f" -ar 44100 -ac 1 -b:a 128k -codec:a libmp3lame "docs/audio/$base"
+          done
+
       - name: Commit mp3 back to repo
         run: |
-          mkdir -p docs/audio
-          cp -f tts_out/*.mp3 docs/audio/ || true
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add docs/audio
-          git commit -m "Add generated mp3" || echo "No changes"
+          git commit -m "Add normalized podcast mp3" || echo "No changes"
           git push
