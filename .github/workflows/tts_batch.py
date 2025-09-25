@@ -29,9 +29,9 @@ DEFAULT_BREAK_MS   = 250
 DEFAULT_OUTPUT_FORMAT = speechsdk.SpeechSynthesisOutputFormat.Audio24Khz160KBitRateMonoMp3
 
 # 默认 Voice（可被环境变量或 CLI 覆盖）
-VOICE_HOST_DEFAULT = "en-US-EmmaMultilingualNeural"
-VOICE_SCI_DEFAULT  = "en-US-AndrewMultilingualNeural"
-RATE_DEFAULT       = "30%"
+VOICE_HOST_DEFAULT = "en-US-Emma:DragonHDLatestNeural"
+VOICE_SCI_DEFAULT  = "en-US-Andrew:DragonHDLatestNeural"
+RATE_DEFAULT       = "20%"
 
 # 角色行匹配
 ROLE_LINE_PAT = re.compile(r'^(host|scientist)\s*:\s*(.+)$', re.I)
