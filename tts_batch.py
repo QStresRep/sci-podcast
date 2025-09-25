@@ -6,6 +6,8 @@ Azure Speech TTS 批处理脚本（长文分段版）
 - 自动清理零宽/控制字符；按句分段（句数 & 字符数双阈值）；逐段合成 MP3
 - 失败时打印 CancellationDetails；可选用 ffmpeg 合并分段
 - 新增参数 --only-full-to-docs：只把 *_full.mp3 复制到 docs/audio
+- 修复：当只有 1 段时也会生成 *_full.mp3，避免 --only-full-to-docs 时无文件可复制
+- 修复：当存在失败时以非零退出码结束，CI 不再“静默成功”
 """
 
 import os, re, html, datetime, pathlib, sys, glob, unicodedata, argparse, subprocess, time, shutil
@@ -19,15 +21,15 @@ except Exception as e:
 
 DEFAULT_INPUT_GLOB = "posts/*.txt"
 DEFAULT_OUT_DIR    = "tts_out"
-DEFAULT_MAX_SENTS  = 100     # ⬅️ 减少每段句子数，降低失败概率
-DEFAULT_MAX_CHARS  = 3500    # ⬅️ 限制每段字符数，加快处理
+DEFAULT_MAX_SENTS  = 100
+DEFAULT_MAX_CHARS  = 3500
 DEFAULT_BREAK_MS   = 250
 
 DEFAULT_OUTPUT_FORMAT = speechsdk.SpeechSynthesisOutputFormat.Audio24Khz160KBitRateMonoMp3
 
 VOICE_HOST_DEFAULT = "en-US-EmmaMultilingualNeural"
 VOICE_SCI_DEFAULT  = "en-US-AndrewMultilingualNeural"
-RATE_DEFAULT       = "20%"   # ⬅️ 改成你要求的 20%
+RATE_DEFAULT       = "+20%"   # ✅ 更稳妥
 
 ROLE_LINE_PAT = re.compile(r'^(host|scientist)\s*:\s*(.+)$', re.I)
 SENT_SPLIT = re.compile(r'(?<=[\.\?\!。！？])\s+')
@@ -174,7 +176,7 @@ def process_file(txt_path: pathlib.Path, out_dir: pathlib.Path, voice_host: str,
         print("[TTS]", txt_path, "->", out_path)
         synth_ssml(ssml, str(out_path), voice_host, output_format)
         outputs.append(out_path)
-        time.sleep(0.2)   # ⬅️ 每段后轻量等待，避免触发速率限制
+        time.sleep(0.2)
 
     return outputs
 
@@ -237,10 +239,30 @@ def main():
                 rate=args.rate, max_sents=args.max_sents, max_chars=args.max_chars,
                 break_ms=args.break_ms, output_format=output_format
             )
-            if args.merge and len(outs) > 1:
-                merged = outs[0].with_name(outs[0].stem.replace("_part1", "") + "_full.mp3")
-                if merge_parts_with_ffmpeg(outs, merged):
-                    merged_outputs.append(merged)
+
+            # ✅ 若 --merge：
+            #  - 多段：用 ffmpeg 合成 *_full.mp3
+            #  - 单段：复制为 *_full.mp3（确保 --only-full-to-docs 时也有文件）
+            if args.merge and outs:
+                if len(outs) > 1:
+                    merged = outs[0].with_name(outs[0].stem.replace("_part1", "") + "_full.mp3")
+                    if merge_parts_with_ffmpeg(outs, merged):
+                        merged_outputs.append(merged)
+                else:
+                    # 只有单段时，把该段复制成 *_full.mp3
+                    src = outs[0]
+                    merged = src.with_name(src.stem + "_full.mp3")
+                    try:
+                        shutil.copy2(src, merged)
+                        print("[OK] single-part copied as full ->", merged)
+                        merged_outputs.append(merged)
+                    except Exception as e:
+                        print("[FAIL] single-part copy failed:", e)
+                        failures.append((str(p), f"single-part copy failed: {e}"))
+
+        except SystemExit as e:
+            print("[FAIL]", p, ":", e)
+            failures.append((str(p), str(e)))
         except Exception as e:
             print("[FAIL]", p, ":", e)
             failures.append((str(p), str(e)))
@@ -250,16 +272,27 @@ def main():
         for m in merged_outputs:
             print(" -", m)
 
-    # ✅ 用 shutil.copy2 复制完整文件到 docs/audio
+    # ✅ 复制 full 到 docs/audio
     if args.only_full_to_docs and merged_outputs:
         docs_dir = pathlib.Path("docs/audio")
         docs_dir.mkdir(parents=True, exist_ok=True)
         for f in merged_outputs:
             target = docs_dir / f.name
-            shutil.copy2(f, target)
-            print("[OK] copied", f, "->", target)
+            try:
+                shutil.copy2(f, target)
+                print("[OK] copied", f, "->", target)
+            except Exception as e:
+                print("[FAIL] copy to docs/audio failed:", e)
+                failures.append((str(f), f"copy failed: {e}"))
 
-    if not merged_outputs and not failures:
+    # ✅ 明确失败/无产物时退出 1
+    if failures:
+        print("\nSome files failed:")
+        for f, e in failures:
+            print(" -", f, ":", e)
+        sys.exit(1)
+
+    if not merged_outputs:
         print("[ERROR] No MP3 generated.")
         sys.exit(1)
 
