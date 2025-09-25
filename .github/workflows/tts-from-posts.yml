@@ -30,7 +30,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
-      - name: Run TTS batch
+      # ✅ 使用新参数 --only-full-to-docs
+      - name: Run TTS batch (only copy *_full.mp3 to docs/audio)
         env:
           SPEECH_KEY: ${{ secrets.SPEECH_KEY }}
           SPEECH_REGION: ${{ secrets.SPEECH_REGION }}
@@ -38,16 +39,7 @@ jobs:
           VOICE_SCI: en-US-AndrewMultilingualNeural
           SPEED: "30%"
         run: |
-          python tts_batch.py --merge
-
-      # ✅ 只复制 *_full.mp3 文件到 docs/audio
-      - name: Move only merged outputs into docs/audio
-        run: |
-          mkdir -p docs/audio
-          shopt -s nullglob
-          for f in tts_out/*_full.mp3; do
-            cp "$f" docs/audio/
-          done
+          python tts_batch.py --merge --only-full-to-docs
 
       - name: Commit outputs
         run: |
