@@ -83,8 +83,8 @@ jobs:
           SPEECH_KEY: ${{ secrets.SPEECH_KEY }}
           SPEECH_REGION: ${{ secrets.SPEECH_REGION }}
           VOICE_HOST: en-US-Emma:DragonHDLatestNeural    # ← 你指定的 HD 声线
-          VOICE_SCI:  en-US-AndrewMultilingualNeural     # ← 常规模块
-          SPEED: +20%                                    # ← 只对支持 prosody 的声线生效（Andrew）
+          VOICE_SCI:  en-US-Andrew:DragonHDLatestNeural     # ← 常规模块
+                                              
         run: |
           # 适当降低块大小，提高稳定性；HD 不用 break，但代码已处理
           python tts_batch.py --merge --max-chars 2500 --break-ms 300 --only-full-to-docs
