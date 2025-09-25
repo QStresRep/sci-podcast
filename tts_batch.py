@@ -1,15 +1,21 @@
 # -*- coding: utf-8 -*-
 """
-Azure Speech TTS 批处理脚本（长文分段版，带自动超长切分保护）
-- 处理 posts/*.txt：第1行=标题；第2行如以 "Date:" 开头则识别日期，否则用今天；其余为正文
-- 正文支持以 "Host:" / "Scientist:" 开头的行来切换说话人（不同 voice）
-- 自动清理零宽/控制字符；按句分段（句数 & 字符数双阈值）；逐段合成 MP3
-- 若单段 SSML 超过 4500 字符，会自动再切分
-- 失败时打印 CancellationDetails；可选用 ffmpeg 合并分段
-- 参数 --only-full-to-docs：只把 *_full.mp3 复制到 docs/audio
+Azure Speech TTS 批处理脚本（稳健版：自动切分 + 指数退避 + 合并重编码）
+- 输入：posts/*.txt
+  * 第1行: 标题；第2行: 可选 "Date: YYYY-MM-DD"；其余为正文
+  * 正文可用 "Host:" / "Scientist:" 标注角色（不同 voice）
+- 防护：
+  * 每段生成前检测 SSML 长度，>4500 自动再切分
+  * 对每段合成加入指数退避重试（默认最多5次）
+  * 失败时打印 Azure 真实错误详情（CancellationDetails）
+  * 可选：--silence-on-fail 失败段落写 1s 静音占位，保证最终能合并
+- 合并：
+  * 始终使用 concat list + re-encode，避免参数不一致导致拼接丢段
+- 发布：
+  * --only-full-to-docs 仅复制 *_full.mp3 到 docs/audio
 """
 
-import os, re, html, datetime, pathlib, sys, glob, unicodedata, argparse, subprocess
+import os, re, html, datetime, pathlib, sys, glob, unicodedata, argparse, subprocess, time, random
 from typing import List, Tuple
 
 try:
@@ -18,39 +24,52 @@ except Exception as e:
     print("[ERROR] Missing package 'azure-cognitiveservices-speech':", e)
     sys.exit(1)
 
+# ---------- 默认参数 ----------
 DEFAULT_INPUT_GLOB = "posts/*.txt"
 DEFAULT_OUT_DIR    = "tts_out"
-DEFAULT_MAX_SENTS  = 40       # 默认更小，避免超长
-DEFAULT_MAX_CHARS  = 1500
+DEFAULT_MAX_SENTS  = 20       # 更保守
+DEFAULT_MAX_CHARS  = 900      # 更保守
 DEFAULT_BREAK_MS   = 250
 
 DEFAULT_OUTPUT_FORMAT = speechsdk.SpeechSynthesisOutputFormat.Audio24Khz160KBitRateMonoMp3
 
-VOICE_HOST_DEFAULT = "en-US-EmmaMultilingualNeural"
-VOICE_SCI_DEFAULT  = "en-US-AndrewMultilingualNeural"
+VOICE_HOST_DEFAULT = "en-US-JennyNeural"    # 建议用广域可用的标准神经音色
+VOICE_SCI_DEFAULT  = "en-US-GuyNeural"
 RATE_DEFAULT       = "30%"
 
 ROLE_LINE_PAT = re.compile(r'^(host|scientist)\s*:\s*(.+)$', re.I)
 SENT_SPLIT = re.compile(r'(?<=[\.\?\!。！？])\s+')
 
-# ---------- helpers ----------
+SSML_MAX_LEN = 4500  # 安全阈值（含标签）
 
+# ---------- 工具函数 ----------
 def canonicalize_voice(v: str | None, fallback: str) -> str:
+    """把奇怪后缀统一成稳定可用的 Neural 名称；清理空格/花样标识。"""
     if not v:
         return fallback
     v = v.strip()
     if ":" in v:
         v = v.split(":", 1)[0].strip()
-    if " " in v and not v.endswith("Neural"):
-        v = v.split(" ", 1)[0].strip()
+    # 把 MultilingualNeural 等映射到 Neural，避免区域不可用
+    v = v.replace("MultilingualNeural", "Neural")
+    # 去掉市场名/花样标识
+    for junk in ["Dragon", "HD", "Latest"]:
+        v = v.replace(junk, "")
+    v = re.sub(r"\s+", "", v)
     return v or fallback
 
 def sanitize_text(s: str) -> str:
+    """基本清洗：换行统一、去零宽/控制符、NFC 规范化。"""
     s = s.replace("\r\n", "\n").replace("\r", "\n")
     for z in ("\u200b", "\u200c", "\u200d", "\ufeff", "\u2060"):
         s = s.replace(z, "")
     s = "".join(ch for ch in s if (ch >= " " or ch in "\n\t"))
     return unicodedata.normalize("NFC", s)
+
+def strict_clean_sentence(s: str) -> str:
+    """更严格的清洗：去掉冷门/可能触发解析的字符（可用 --strict-clean 开启）。"""
+    allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,!?;:'\"-()[]{}%/:+&=_"
+    return "".join(ch if ch in allowed else " " for ch in s)
 
 def slugify(s: str) -> str:
     s = s.strip().lower().replace(" ", "-")
@@ -65,23 +84,25 @@ def parse_role_line(line: str, voice_host: str, voice_sci: str) -> Tuple[str, st
         return voice, content
     return voice_host, line.strip()
 
-def to_sentences(text: str):
-    return [seg.strip() for seg in SENT_SPLIT.split(text) if seg and seg.strip()]
+def to_sentences(text: str, strict: bool = False):
+    segs = [seg.strip() for seg in SENT_SPLIT.split(text) if seg and seg.strip()]
+    if strict:
+        segs = [strict_clean_sentence(x) for x in segs]
+    return segs
 
-def build_dialog_items(body: str, voice_host: str, voice_sci: str):
+def build_dialog_items(body: str, voice_host: str, voice_sci: str, strict: bool):
     items = []
     for raw_ln in body.split("\n"):
         ln = raw_ln.strip()
         if not ln:
             continue
         voice, content = parse_role_line(ln, voice_host, voice_sci)
-        sents = to_sentences(content) or [content]
+        sents = to_sentences(content, strict=strict) or [content]
         items.append((voice, sents))
     return items
 
 def chunk_dialog_items(items, max_sents: int, max_chars: int):
-    chunks = []
-    cur = []
+    chunks, cur = [], []
     sent_count = 0
     char_count = 0
 
@@ -89,9 +110,7 @@ def chunk_dialog_items(items, max_sents: int, max_chars: int):
         nonlocal cur, sent_count, char_count
         if cur:
             chunks.append(cur)
-            cur = []
-            sent_count = 0
-            char_count = 0
+            cur, sent_count, char_count = [], 0, 0
 
     for voice, sents in items:
         for s in sents:
@@ -104,7 +123,6 @@ def chunk_dialog_items(items, max_sents: int, max_chars: int):
                 cur.append((voice, [s]))
             sent_count += 1
             char_count += s_len
-
     flush()
     return chunks
 
@@ -120,42 +138,66 @@ def build_ssml_from_chunk(chunk, rate: str, break_ms: int) -> str:
         )
     return '<speak version="1.0" xml:lang="en-US">' + "".join(parts) + "</speak>"
 
-# ---------- Azure synth ----------
-
-def synth_ssml(ssml: str, out_path: str, prefer_voice_for_config: str, output_format):
-    key = os.getenv("SPEECH_KEY"); region = os.getenv("SPEECH_REGION")
-    if not key or not region:
-        raise SystemExit("Missing SPEECH_KEY / SPEECH_REGION secrets.")
-    speech_config = speechsdk.SpeechConfig(subscription=key, region=region)
-    speech_config.speech_synthesis_voice_name = prefer_voice_for_config
-    speech_config.set_speech_synthesis_output_format(output_format)
-
-    audio_config = speechsdk.audio.AudioOutputConfig(filename=out_path)
-    synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=audio_config)
-
-    print(f"[DEBUG] SSML length={len(ssml)}")
-    if len(ssml) > 4500:
-        raise RuntimeError(f"SSML too long ({len(ssml)}), need split")
-
-    result = synthesizer.speak_ssml_async(ssml).get()
-    if result.reason != speechsdk.ResultReason.SynthesizingAudioCompleted:
-        try:
-            details = speechsdk.CancellationDetails(result)
-            raise RuntimeError("TTS canceled: reason=" + str(details.reason) + " | error=" + str(details.error_details))
-        except Exception:
-            raise RuntimeError("TTS canceled: reason=" + str(result.reason))
-
-# ---------- processing ----------
-
-def split_chunk_if_needed(chunk, max_half=20):
-    """如果 SSML 太长，强制二分"""
+def split_chunk_in_half(chunk):
     if len(chunk) <= 1:
         return [chunk]
     mid = len(chunk) // 2
     return [chunk[:mid], chunk[mid:]]
 
+# ---------- Azure 合成（带退避重试） ----------
+def synth_ssml_with_retry(ssml: str, out_path: str, prefer_voice_for_config: str, output_format,
+                          retries: int = 5, base_delay: float = 0.6, jitter: float = 0.4):
+    key = os.getenv("SPEECH_KEY"); region = os.getenv("SPEECH_REGION")
+    if not key or not region:
+        raise SystemExit("Missing SPEECH_KEY / SPEECH_REGION secrets.")
+
+    speech_config = speechsdk.SpeechConfig(subscription=key, region=region)
+    speech_config.speech_synthesis_voice_name = prefer_voice_for_config
+    speech_config.set_speech_synthesis_output_format(output_format)
+    try:
+        speech_config.set_profanity(speechsdk.ProfanityOption.Removed)
+    except Exception:
+        pass
+
+    audio_config = speechsdk.audio.AudioOutputConfig(filename=out_path)
+    synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=audio_config)
+
+    if len(ssml) > SSML_MAX_LEN:
+        raise RuntimeError(f"SSML too long ({len(ssml)}), need split")
+
+    attempt = 0
+    while True:
+        attempt += 1
+        print(f"[DEBUG] synth attempt={attempt} ssml_len={len(ssml)} -> {out_path}")
+        result = synthesizer.speak_ssml_async(ssml).get()
+        if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
+            return  # success
+
+        # 解析错误详情
+        try:
+            details = speechsdk.CancellationDetails.from_result(result)
+            err = f"reason={details.reason}; error={details.error_details}"
+        except Exception:
+            err = f"reason={result.reason}"
+
+        # 可重试类：限流/瞬断/未知取消 → 退避
+        retriable = any(k in (err or "").lower() for k in [
+            "timeout", "throttle", "429", "temporarily", "connection", "network", "quota", "rate limit", "server busy"
+        ])
+
+        if attempt <= retries and retriable:
+            delay = base_delay * (2 ** (attempt - 1)) + random.uniform(0, jitter)
+            print(f"[WARN] TTS canceled ({err}). retrying in {delay:.2f}s ...")
+            time.sleep(delay)
+            continue
+
+        # 不可重试或到达重试上限
+        raise RuntimeError(f"TTS canceled: {err}")
+
+# ---------- 文件处理 ----------
 def process_file(txt_path: pathlib.Path, out_dir: pathlib.Path, voice_host: str, voice_sci: str,
-                 rate: str, max_sents: int, max_chars: int, break_ms: int, output_format):
+                 rate: str, max_sents: int, max_chars: int, break_ms: int, output_format,
+                 strict_clean: bool, silence_on_fail: bool, retries: int, base_delay: float, jitter: float):
     raw = txt_path.read_text(encoding="utf-8").splitlines()
     if len(raw) < 3:
         print("[WARN] too short:", txt_path)
@@ -177,37 +219,62 @@ def process_file(txt_path: pathlib.Path, out_dir: pathlib.Path, voice_host: str,
     base_name = safe_date + "_" + slugify(title) + ".mp3"
     base_out = out_dir / base_name
 
-    items  = build_dialog_items(body, voice_host, voice_sci)
+    items  = build_dialog_items(body, voice_host, voice_sci, strict=strict_clean)
     chunks = chunk_dialog_items(items, max_sents=max_sents, max_chars=max_chars)
-    outputs = []
+    outputs: List[pathlib.Path] = []
 
     print("[INFO] chunks=" + str(len(chunks)))
 
     for idx, chunk in enumerate(chunks, 1):
-        ssml = build_ssml_from_chunk(chunk, rate, break_ms)
+        subs = [chunk]
+        # 预检查并按需切分，直到所有子块 SSML 不超阈值
+        while True:
+            need_split = False
+            new_subs = []
+            for c in subs:
+                ssml = build_ssml_from_chunk(c, rate, break_ms)
+                if len(ssml) > SSML_MAX_LEN:
+                    need_split = True
+                    new_subs.extend(split_chunk_in_half(c))
+                else:
+                    new_subs.append(c)
+            subs = new_subs
+            if not need_split:
+                break
 
-        # 如果太长，二分再处理
-        if len(ssml) > 4500:
-            print("[WARN] chunk too long, splitting...")
-            subchunks = split_chunk_if_needed(chunk)
-        else:
-            subchunks = [chunk]
-
-        for j, sub in enumerate(subchunks, 1):
+        for j, sub in enumerate(subs, 1):
             ssml_sub = build_ssml_from_chunk(sub, rate, break_ms)
-            out_path = (
-                base_out if (len(chunks) == 1 and len(subchunks) == 1)
-                else base_out.with_name(base_out.stem + f"_part{idx}_{j}" + base_out.suffix)
-            )
+            out_path = base_out if (len(chunks) == 1 and len(subs) == 1) else \
+                base_out.with_name(base_out.stem + f"_part{idx}_{j}" + base_out.suffix)
             print("[TTS]", txt_path, "->", out_path)
-            synth_ssml(ssml_sub, str(out_path), voice_host, output_format)
-            print("[OK] wrote", out_path, "(", out_path.stat().st_size, "bytes )")
-            outputs.append(out_path)
+
+            try:
+                synth_ssml_with_retry(
+                    ssml_sub, str(out_path),
+                    prefer_voice_for_config=voice_host,
+                    output_format=output_format,
+                    retries=retries, base_delay=base_delay, jitter=jitter
+                )
+                print("[OK] wrote", out_path, "(", out_path.stat().st_size, "bytes )")
+                outputs.append(out_path)
+            except Exception as e:
+                print("[FAIL segment]", out_path, ":", e)
+                if silence_on_fail:
+                    # 写 1 秒静音占位，保证合并不中断
+                    try:
+                        subprocess.run([
+                            "ffmpeg", "-y", "-f", "lavfi",
+                            "-i", "anullsrc=channel_layout=mono:sample_rate=24000",
+                            "-t", "1", "-q:a", "9", str(out_path)
+                        ], check=True)
+                        print("[OK] wrote silence placeholder ->", out_path)
+                        outputs.append(out_path)
+                    except Exception as ee:
+                        print("[FAIL] write silence failed:", ee)
 
     return outputs
 
-# ---------- merge ----------
-
+# ---------- 合并 ----------
 def merge_parts_with_ffmpeg(parts: List[pathlib.Path], merged_path: pathlib.Path):
     if not parts:
         return False
@@ -228,10 +295,9 @@ def merge_parts_with_ffmpeg(parts: List[pathlib.Path], merged_path: pathlib.Path
         print("[FAIL] merge failed:", e)
         return False
 
-# ---------- main ----------
-
+# ---------- 主程序 ----------
 def main():
-    ap = argparse.ArgumentParser(description="Azure Speech TTS batch (long-text segmented, auto-split).")
+    ap = argparse.ArgumentParser(description="Azure Speech TTS batch (robust).")
     ap.add_argument("--input-glob", default=os.getenv("INPUT_GLOB", DEFAULT_INPUT_GLOB))
     ap.add_argument("--out-dir",    default=os.getenv("OUT_DIR", DEFAULT_OUT_DIR))
     ap.add_argument("--max-sents",  type=int, default=int(os.getenv("MAX_SENTS", DEFAULT_MAX_SENTS)))
@@ -244,6 +310,13 @@ def main():
     ap.add_argument("--use-48k",    action="store_true", help="Use 48k/192k MP3 output instead of default 24k/160k.")
     ap.add_argument("--only-full-to-docs", action="store_true",
                     help="Copy only *_full.mp3 into docs/audio (for publishing).")
+    ap.add_argument("--strict-clean", action="store_true",
+                    help="Apply strict character filtering on sentences.")
+    ap.add_argument("--silence-on-fail", action="store_true",
+                    help="Write 1s silence for a failed segment, instead of aborting the whole run.")
+    ap.add_argument("--retries", type=int, default=int(os.getenv("TTS_RETRIES", 5)))
+    ap.add_argument("--retry-base", type=float, default=float(os.getenv("TTS_RETRY_BASE", 0.6)))
+    ap.add_argument("--retry-jitter", type=float, default=float(os.getenv("TTS_RETRY_JITTER", 0.4)))
     args = ap.parse_args()
 
     out_dir = pathlib.Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
@@ -259,25 +332,23 @@ def main():
 
     total_parts = 0
     merged_outputs = []
-    failures = []
-
     for fp in files:
         p = pathlib.Path(fp)
-        try:
-            outs = process_file(
-                txt_path=p, out_dir=out_dir,
-                voice_host=args.voice_host, voice_sci=args.voice_sci,
-                rate=args.rate, max_sents=args.max_sents, max_chars=args.max_chars,
-                break_ms=args.break_ms, output_format=output_format
-            )
-            total_parts += len(outs)
-            if args.merge and len(outs) > 1:
-                merged = outs[0].with_name(outs[0].stem.replace("_part1", "") + "_full.mp3")
-                if merge_parts_with_ffmpeg(outs, merged):
-                    merged_outputs.append(merged)
-        except Exception as e:
-            print("[FAIL]", p, ":", e)
-            failures.append((str(p), str(e)))
+        outs = process_file(
+            txt_path=p, out_dir=out_dir,
+            voice_host=args.voice_host, voice_sci=args.voice_sci,
+            rate=args.rate, max_sents=args.max_sents, max_chars=args.max_chars,
+            break_ms=args.break_ms, output_format=output_format,
+            strict_clean=args.strict_clean, silence_on_fail=args.silence_on_fail,
+            retries=args.retries, base_delay=args.retry_base, jitter=args.retry_jitter
+        )
+        total_parts += len(outs)
+        if args.merge and len(outs) > 1:
+            # 注意：新的 part 命名是 _part{i}_{j}，按字典序合并即可
+            outs_sorted = sorted(outs, key=lambda pth: pth.name)
+            merged = outs_sorted[0].with_name(re.sub(r"_part\d+_\d+$", "", outs_sorted[0].stem) + "_full.mp3")
+            if merge_parts_with_ffmpeg(outs_sorted, merged):
+                merged_outputs.append(merged)
 
     if merged_outputs:
         print("\nMerged outputs:")
