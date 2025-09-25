@@ -47,6 +47,13 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # 停止跟踪 tts_out 文件夹（只执行一次即可）
+          git rm -r --cached tts_out || true
+          echo "tts_out/" >> .gitignore
+          git add .gitignore
+
+          # 只提交 docs/audio
           git add docs/audio
           git commit -m "Add merged TTS outputs" || echo "Nothing to commit"
           git pull --rebase
