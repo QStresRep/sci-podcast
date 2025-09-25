@@ -3,37 +3,31 @@ name: TTS from posts
 on:
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
   tts:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install ffmpeg
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install azure-cognitiveservices-speech
 
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
       - name: Run TTS batch
+        run: |
+          python tts_batch.py --merge --only-full-to-docs
         env:
           SPEECH_KEY: ${{ secrets.SPEECH_KEY }}
           SPEECH_REGION: ${{ secrets.SPEECH_REGION }}
           VOICE_HOST: en-US-EmmaMultilingualNeural
           VOICE_SCI: en-US-AndrewMultilingualNeural
           SPEED: 20%
-          MAX_CHARS: 500         # 每个 chunk 最大字符数（更小，更稳）
-          MAX_SENTS: 40          # 每个 chunk 最大句子数
-          INTER_SEG_SLEEP: 2     # 每段之间强制等待 2 秒，降低限流风险
-        run: |
-          python tts_batch.py --merge --only-full-to-docs
 
       - name: Commit merged TTS outputs
         run: |
@@ -41,4 +35,5 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add docs/audio
           git commit -m "Add merged TTS outputs" || echo "Nothing to commit"
+          git pull --rebase
           git push
