@@ -102,13 +102,6 @@ jobs:
           ls -alh tts_out || true
           ls -alh docs/audio || true
 
-                                              
-        run: |
-          # 适当降低块大小，提高稳定性；HD 不用 break，但代码已处理
-          python tts_batch.py --merge --max-chars 2500 --break-ms 300 --only-full-to-docs
-          echo "List outputs:"
-          ls -alh tts_out || true
-          ls -alh docs/audio || true
 
       - name: Commit merged audio
         run: |
