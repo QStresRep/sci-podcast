@@ -26,9 +26,12 @@ jobs:
         env:
           SPEECH_KEY: ${{ secrets.SPEECH_KEY }}
           SPEECH_REGION: ${{ secrets.SPEECH_REGION }}
-          VOICE_HOST: en-US-EmmaDragonHDLatestNeural
+          VOICE_HOST: en-US-EmmaMultilingualNeural
           VOICE_SCI: en-US-AndrewMultilingualNeural
           SPEED: 20%
+          MAX_CHARS: 500         # 每个 chunk 最大字符数（更小，更稳）
+          MAX_SENTS: 40          # 每个 chunk 最大句子数
+          INTER_SEG_SLEEP: 2     # 每段之间强制等待 2 秒，降低限流风险
         run: |
           python tts_batch.py --merge --only-full-to-docs
 
