@@ -30,7 +30,7 @@ jobs:
           test -n "${{ secrets.SPEECH_KEY }}" || (echo "Missing SPEECH_KEY" && exit 1)
           test -n "${{ secrets.SPEECH_REGION }}" || (echo "Missing SPEECH_REGION" && exit 1)
 
-      # 可选但强烈建议：检查你选的 voice 是否在该 region 可用
+      # 可选检查：若接口 429，则跳过，不阻塞
       - name: Check voices availability (best-effort)
         env:
           SPEECH_KEY: ${{ secrets.SPEECH_KEY }}
@@ -52,19 +52,19 @@ jobs:
           done
           if [ "$code" != "200" ]; then
             echo "::warning::Could not fetch voices list (HTTP $code). Skipping availability check."
-            exit 0  # ← 软跳过，不让工作流失败
+            exit 0
           fi
 
-          echo "Top voices in ${SPEECH_REGION}:"
+          echo "Sample voices:"
           jq -r '.[0:8][] | "\(.ShortName) | \(.Locale)"' voices.json || true
 
-          if ! jq -r '.[].ShortName' voices.json | grep -xq "en-US-EmmaMultilingualNeural"; then
-            echo "::warning::Voice en-US-EmmaMultilingualNeural not found in ${SPEECH_REGION}. Consider en-US-JennyNeural."
+          # 仅做提醒，不阻塞
+          if ! jq -r '.[].ShortName' voices.json | grep -xq "en-US-Emma:DragonHDLatestNeural"; then
+            echo "::warning::HD voice en-US-Emma:DragonHDLatestNeural not found in ${SPEECH_REGION}."
           fi
           if ! jq -r '.[].ShortName' voices.json | grep -xq "en-US-AndrewMultilingualNeural"; then
-            echo "::warning::Voice en-US-AndrewMultilingualNeural not found in ${SPEECH_REGION}. Consider en-US-GuyNeural."
+            echo "::warning::Voice en-US-AndrewMultilingualNeural not found in ${SPEECH_REGION}."
           fi
-
 
       - name: Debug posts folder
         run: |
@@ -82,11 +82,12 @@ jobs:
         env:
           SPEECH_KEY: ${{ secrets.SPEECH_KEY }}
           SPEECH_REGION: ${{ secrets.SPEECH_REGION }}
-          VOICE_HOST: en-US-EmmaMultilingualNeural
-          VOICE_SCI: en-US-AndrewMultilingualNeural
-          SPEED: +20%   # ← 关键修复：必须带“+”
+          VOICE_HOST: en-US-Emma:DragonHDLatestNeural    # ← 你指定的 HD 声线
+          VOICE_SCI:  en-US-AndrewMultilingualNeural     # ← 常规模块
+          SPEED: +20%                                    # ← 只对支持 prosody 的声线生效（Andrew）
         run: |
-          python tts_batch.py --merge --only-full-to-docs
+          # 适当降低块大小，提高稳定性；HD 不用 break，但代码已处理
+          python tts_batch.py --merge --max-chars 2500 --break-ms 300 --only-full-to-docs
           echo "List outputs:"
           ls -alh tts_out || true
           ls -alh docs/audio || true
