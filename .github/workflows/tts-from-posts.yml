@@ -2,11 +2,6 @@ name: TTS from posts
 
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - "posts/**/*.txt"
-      - ".github/workflows/tts-from-posts.yml"
-      - "tts_batch.py"
 
 permissions:
   contents: write
@@ -15,33 +10,34 @@ jobs:
   tts:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install azure-cognitiveservices-speech
+
+      - name: Install ffmpeg
+        run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
-      # ✅ 使用新参数 --only-full-to-docs
-      - name: Run TTS batch (only copy *_full.mp3 to docs/audio)
+      - name: Run TTS batch
+        run: |
+          python tts_batch.py --merge --only-full-to-docs --retries 8 --retry-base 1.0 --retry-jitter 0.8
         env:
           SPEECH_KEY: ${{ secrets.SPEECH_KEY }}
           SPEECH_REGION: ${{ secrets.SPEECH_REGION }}
           VOICE_HOST: en-US-EmmaMultilingualNeural
           VOICE_SCI: en-US-AndrewMultilingualNeural
-          SPEED: "30%"
-        run: |
-          python tts_batch.py --merge --only-full-to-docs
+          SPEED: 30%
 
-      - name: Commit outputs
+      - name: Commit merged TTS outputs
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
