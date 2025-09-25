@@ -29,12 +29,11 @@ jobs:
         run: |
           mkdir -p docs/audio_norm
           shopt -s nullglob
-          for f in docs/audio/*.mp3; do
+          for f in docs/audio/*_full.mp3; do
             base=$(basename "$f")
             ffmpeg -y -i "$f" -ar 44100 -ac 1 -b:a 128k -codec:a libmp3lame "docs/audio_norm/$base"
           done
-          # 用规范化后的文件覆盖原文件
-          for f in docs/audio_norm/*.mp3; do
+          for f in docs/audio_norm/*_full.mp3; do
             base=$(basename "$f")
             mv -f "$f" "docs/audio/$base"
           done
@@ -47,26 +46,27 @@ jobs:
           set -euo pipefail
           python - <<'PY'
           import os, glob, time, subprocess, xml.sax.saxutils as xu, pathlib, json
-          from urllib.parse import quote  # 用于 URL 编码
+          from urllib.parse import quote  
 
           SITE_TITLE = os.getenv("PODCAST_TITLE", "QS-sci-podcast")
-          SITE_LINK  = "https://qstresrep.github.io/sci-podcast/"   # ← 你的 GitHub Pages 根地址
+          SITE_LINK  = "https://qstresrep.github.io/sci-podcast/"
           SITE_DESC  = os.getenv("PODCAST_DESCRIPTION", "Bulk Reading!")
 
-          # Pages 以 docs/ 为站点根，因此 docs/audio/* 会发布在 /audio/*
           AUDIO_BASE = SITE_LINK.rstrip('/') + "/audio/"
 
-          files = sorted(glob.glob("docs/audio/*.mp3"))
+          # ✅ 只包含 *_full.mp3
+          files = sorted(glob.glob("docs/audio/*_full.mp3"))
 
           def ffprobe_json(path):
               cmd = ["ffprobe", "-v", "error", "-print_format", "json", "-show_format", path]
               out = subprocess.check_output(cmd, text=True)
+              import json
               return json.loads(out)
 
           items_xml = []
           for f in files:
               st = os.stat(f)
-              size = st.st_size  # enclosure length（字节）
+              size = st.st_size
               info = ffprobe_json(f)
               dur  = float(info.get("format", {}).get("duration", 0))
               h = int(dur // 3600); m = int((dur % 3600) // 60); s = int(dur % 60)
@@ -76,8 +76,6 @@ jobs:
               title = os.path.splitext(base)[0]
               pub_ts = time.gmtime(st.st_mtime)
               pub_str = time.strftime("%a, %d %b %Y %H:%M:%S +0000", pub_ts)
-
-              # 用 quote 编码 URL，避免空格/特殊字符问题
               url = AUDIO_BASE + quote(base)
 
               items_xml.append(f"""
@@ -91,8 +89,6 @@ jobs:
                 </item>
               """.strip())
 
-          items_joined = ''.join(items_xml) if items_xml else ""
-
           rss = f"""<?xml version="1.0" encoding="UTF-8"?>
           <rss version="2.0"
                xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
@@ -102,7 +98,7 @@ jobs:
               <description>{xu.escape(SITE_DESC)}</description>
               <language>en-us</language>
               <lastBuildDate>{time.strftime("%a, %d %b %Y %H:%M:%S +0000", time.gmtime())}</lastBuildDate>
-              {items_joined}
+              {''.join(items_xml)}
             </channel>
           </rss>
           """
@@ -126,6 +122,6 @@ jobs:
           tag_name: ${{ github.event.inputs.tag || format('v{0}', github.run_id) }}
           name: ${{ github.event.inputs.title || 'Podcast Audio' }}
           files: |
-            docs/audio/*.mp3
+            docs/audio/*_full.mp3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
