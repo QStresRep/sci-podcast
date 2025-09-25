@@ -4,57 +4,37 @@ on:
   workflow_dispatch:
 
 jobs:
-  tts:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install azure-cognitiveservices-speech
+          pip install azure-cognitiveservices-speech pydub
 
-      - name: Install ffmpeg
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
+      - name: Debug posts folder
+        run: ls -R posts || echo "No posts folder!"
 
       - name: Run TTS batch
-        run: |
-          python tts_batch.py --merge --only-full-to-docs
         env:
           SPEECH_KEY: ${{ secrets.SPEECH_KEY }}
           SPEECH_REGION: ${{ secrets.SPEECH_REGION }}
           VOICE_HOST: en-US-EmmaMultilingualNeural
           VOICE_SCI: en-US-AndrewMultilingualNeural
           SPEED: 20%
+        run: python tts_batch.py --merge --only-full-to-docs
 
-      - name: Keep only the latest _full.mp3
-        run: |
-          shopt -s nullglob
-          files=(docs/audio/*_full.mp3)
-          if [ ${#files[@]} -gt 1 ]; then
-            sorted=($(ls -t docs/audio/*_full.mp3))
-            latest=${sorted[0]}
-            echo "Keeping latest: $latest"
-            for f in "${sorted[@]:1}"; do
-              echo "Removing old: $f"
-              rm -f "$f"
-            done
-          fi
-
-      - name: Commit merged TTS outputs
+      - name: Commit merged audio
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # 停止跟踪 tts_out 文件夹（只执行一次即可）
-          git rm -r --cached tts_out || true
-          echo "tts_out/" >> .gitignore
-          git add .gitignore
-
-          # 只提交 docs/audio
           git add docs/audio
           git commit -m "Add merged TTS outputs" || echo "Nothing to commit"
-          git pull --rebase
           git push
