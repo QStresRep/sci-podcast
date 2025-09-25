@@ -40,15 +40,16 @@ jobs:
         run: |
           python tts_batch.py --merge
 
-      - name: Move outputs into docs/audio
+      # ✅ 只把最终合并好的 *_full.mp3 放到 docs/audio
+      - name: Move only merged outputs into docs/audio
         run: |
           mkdir -p docs/audio
-          cp -r tts_out/* docs/audio/ || true
+          cp -r tts_out/*_full.mp3 docs/audio/ || true
 
       - name: Commit outputs
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add docs/audio
-          git commit -m "Add TTS outputs" || echo "Nothing to commit"
+          git commit -m "Add merged TTS outputs" || echo "Nothing to commit"
           git push
