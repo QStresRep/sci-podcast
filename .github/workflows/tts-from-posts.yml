@@ -29,6 +29,20 @@ jobs:
           VOICE_SCI: en-US-AndrewMultilingualNeural
           SPEED: 20%
 
+      - name: Keep only the latest _full.mp3
+        run: |
+          shopt -s nullglob
+          files=(docs/audio/*_full.mp3)
+          if [ ${#files[@]} -gt 1 ]; then
+            sorted=($(ls -t docs/audio/*_full.mp3))
+            latest=${sorted[0]}
+            echo "Keeping latest: $latest"
+            for f in "${sorted[@]:1}"; do
+              echo "Removing old: $f"
+              rm -f "$f"
+            done
+          fi
+
       - name: Commit merged TTS outputs
         run: |
           git config user.name "github-actions[bot]"
