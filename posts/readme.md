@@ -1,0 +1,1 @@
+rename post to posts
