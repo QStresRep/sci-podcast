@@ -17,10 +17,13 @@ except Exception as e:
     print("[ERROR] Missing package 'azure-cognitiveservices-speech':", e)
     sys.exit(1)
 
+# =========================
+# 默认参数
+# =========================
 DEFAULT_INPUT_GLOB = "posts/*.txt"
 DEFAULT_OUT_DIR    = "tts_out"
-DEFAULT_MAX_SENTS  = 120
-DEFAULT_MAX_CHARS  = 8000
+DEFAULT_MAX_SENTS  = 80      # 🔧 降低默认句子数
+DEFAULT_MAX_CHARS  = 4000    # 🔧 降低默认字符数
 DEFAULT_BREAK_MS   = 250
 
 DEFAULT_OUTPUT_FORMAT = speechsdk.SpeechSynthesisOutputFormat.Audio24Khz160KBitRateMonoMp3
@@ -32,6 +35,9 @@ RATE_DEFAULT       = "30%"
 ROLE_LINE_PAT = re.compile(r'^(host|scientist)\s*:\s*(.+)$', re.I)
 SENT_SPLIT = re.compile(r'(?<=[\.\?\!。！？])\s+')
 
+# =========================
+# 工具函数
+# =========================
 def canonicalize_voice(v: str | None, fallback: str) -> str:
     if not v:
         return fallback
@@ -127,6 +133,9 @@ def synth_ssml(ssml: str, out_path: str, prefer_voice_for_config: str, output_fo
 
     audio_config = speechsdk.audio.AudioOutputConfig(filename=out_path)
     synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=audio_config)
+
+    print(f"[DEBUG] SSML length: {len(ssml)}")  # debug 输出
+
     result = synthesizer.speak_ssml_async(ssml).get()
 
     if result.reason != speechsdk.ResultReason.SynthesizingAudioCompleted:
@@ -135,6 +144,26 @@ def synth_ssml(ssml: str, out_path: str, prefer_voice_for_config: str, output_fo
             raise RuntimeError("TTS canceled: reason=" + str(details.reason) + " | error=" + str(details.error_details))
         except Exception:
             raise RuntimeError("TTS canceled: reason=" + str(result.reason))
+
+def safe_synth_chunk(chunk, out_path, voice_host, rate, break_ms, output_format):
+    """尝试合成，如果失败则拆半重试"""
+    ssml = build_ssml_from_chunk(chunk, rate, break_ms)
+    try:
+        synth_ssml(ssml, str(out_path), voice_host, output_format)
+        print("[OK] wrote", out_path, "(", out_path.stat().st_size, "bytes )")
+        return True
+    except Exception as e:
+        print("[WARN] synth failed for", out_path, ":", e)
+        # 自动拆半重试
+        if len(chunk) > 1:
+            mid = len(chunk) // 2
+            part1, part2 = chunk[:mid], chunk[mid:]
+            out1 = out_path.with_name(out_path.stem + "_retry1" + out_path.suffix)
+            out2 = out_path.with_name(out_path.stem + "_retry2" + out_path.suffix)
+            ok1 = safe_synth_chunk(part1, out1, voice_host, rate, break_ms, output_format)
+            ok2 = safe_synth_chunk(part2, out2, voice_host, rate, break_ms, output_format)
+            return ok1 and ok2
+        return False
 
 def process_file(txt_path: pathlib.Path, out_dir: pathlib.Path, voice_host: str, voice_sci: str,
                  rate: str, max_sents: int, max_chars: int, break_ms: int, output_format):
@@ -166,12 +195,11 @@ def process_file(txt_path: pathlib.Path, out_dir: pathlib.Path, voice_host: str,
     print("[INFO] chunks=" + str(len(chunks)))
 
     for idx, chunk in enumerate(chunks, 1):
-        ssml = build_ssml_from_chunk(chunk, rate, break_ms)
         out_path = base_out if len(chunks) == 1 else base_out.with_name(base_out.stem + "_part" + str(idx) + base_out.suffix)
         print("[TTS]", txt_path, "->", out_path)
-        synth_ssml(ssml, str(out_path), voice_host, output_format)
-        print("[OK] wrote", out_path, "(", out_path.stat().st_size, "bytes )")
-        outputs.append(out_path)
+        ok = safe_synth_chunk(chunk, out_path, voice_host, rate, break_ms, output_format)
+        if ok:
+            outputs.append(out_path)
 
     return outputs
 
