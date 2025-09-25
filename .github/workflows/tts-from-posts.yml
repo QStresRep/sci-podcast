@@ -4,36 +4,64 @@ on:
   workflow_dispatch:
 
 jobs:
-  tts:
+  build:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install azure-cognitiveservices-speech
+          pip install azure-cognitiveservices-speech pydub
 
+      # ✅ 必须装 ffmpeg，否则 --merge 不能生成 *_full.mp3
       - name: Install ffmpeg
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
-      - name: Run TTS batch
+      # ✅ 没密钥就快速失败，不再“跑完没东西”
+      - name: Verify Azure secrets
         run: |
-          python tts_batch.py --merge --only-full-to-docs
+          test -n "${{ secrets.SPEECH_KEY }}" || (echo "Missing SPEECH_KEY" && exit 1)
+          test -n "${{ secrets.SPEECH_REGION }}" || (echo "Missing SPEECH_REGION" && exit 1)
+
+      - name: Debug posts folder
+        run: |
+          echo "Listing posts/"
+          ls -alh posts || echo "No posts folder!"
+          echo "Show first file head (if any):"
+          for f in posts/*.txt; do
+            [ -e "$f" ] || continue
+            echo "---- $f ----"
+            head -n 5 "$f"
+            break
+          done
+
+      - name: Run TTS batch
         env:
           SPEECH_KEY: ${{ secrets.SPEECH_KEY }}
           SPEECH_REGION: ${{ secrets.SPEECH_REGION }}
           VOICE_HOST: en-US-EmmaMultilingualNeural
           VOICE_SCI: en-US-AndrewMultilingualNeural
           SPEED: 20%
+        run: |
+          python tts_batch.py --merge --only-full-to-docs
+          echo "List outputs:"
+          ls -alh tts_out || true
+          ls -alh docs/audio || true
 
-      - name: Commit merged TTS outputs
+      # 只提交 docs/audio（发布用）
+      - name: Commit merged audio
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add docs/audio
           git commit -m "Add merged TTS outputs" || echo "Nothing to commit"
-          git pull --rebase
           git push
