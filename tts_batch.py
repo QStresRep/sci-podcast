@@ -34,8 +34,8 @@ DEFAULT_BREAK_MS   = 250
 DEFAULT_OUTPUT_FORMAT = speechsdk.SpeechSynthesisOutputFormat.Audio24Khz160KBitRateMonoMp3
 
 VOICE_HOST_DEFAULT = "en-US-Emma:DragonHDLatestNeural"
-VOICE_SCI_DEFAULT  = "en-US-AndrewMultilingualNeural"
-RATE_DEFAULT       = "+20%"  # 若传入 "20%" 自动转成 "+20%"
+VOICE_SCI_DEFAULT  = "en-US-Andrew:DragonHDLatestNeural"
+RATE_DEFAULT       = "20%"  # 若传入 "20%" 自动转成 "+20%"
 
 ROLE_LINE_PAT = re.compile(r'^(host|scientist)\s*:\s*(.+)$', re.I)
 SENT_SPLIT = re.compile(r'(?<=[\.\?\!。！？])\s+')
