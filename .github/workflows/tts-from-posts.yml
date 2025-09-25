@@ -40,11 +40,14 @@ jobs:
         run: |
           python tts_batch.py --merge
 
-      # ✅ 只把最终合并好的 *_full.mp3 放到 docs/audio
+      # ✅ 只复制 *_full.mp3 文件到 docs/audio
       - name: Move only merged outputs into docs/audio
         run: |
           mkdir -p docs/audio
-          cp -r tts_out/*_full.mp3 docs/audio/ || true
+          shopt -s nullglob
+          for f in tts_out/*_full.mp3; do
+            cp "$f" docs/audio/
+          done
 
       - name: Commit outputs
         run: |
