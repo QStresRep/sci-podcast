@@ -20,17 +20,33 @@ jobs:
           python -m pip install --upgrade pip
           pip install azure-cognitiveservices-speech pydub
 
-      # ✅ 必须装 ffmpeg，否则 --merge 不能生成 *_full.mp3
       - name: Install ffmpeg
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg jq
 
-      # ✅ 没密钥就快速失败，不再“跑完没东西”
       - name: Verify Azure secrets
         run: |
           test -n "${{ secrets.SPEECH_KEY }}" || (echo "Missing SPEECH_KEY" && exit 1)
           test -n "${{ secrets.SPEECH_REGION }}" || (echo "Missing SPEECH_REGION" && exit 1)
+
+      # ✅ 先验证 key/region 是否可用 & 目标 voice 是否在该 region 可用
+      - name: Check voices availability
+        env:
+          SPEECH_KEY: ${{ secrets.SPEECH_KEY }}
+          SPEECH_REGION: ${{ secrets.SPEECH_REGION }}
+        run: |
+          set -e
+          echo "Querying voices for region: ${SPEECH_REGION}"
+          # 取回可用 voices 列表
+          curl -sS -f -H "Ocp-Apim-Subscription-Key: ${SPEECH_KEY}" \
+            "https://${SPEECH_REGION}.tts.speech.microsoft.com/cognitiveservices/voices/list" > voices.json
+          echo "Top 5 voices:"
+          cat voices.json | jq -r '.[0:5][] | "\(.ShortName) | \(.Locale) | \(.Gender)"'
+          # 检查你配置的两个 voice 是否存在
+          (cat voices.json | jq -r '.[].ShortName' | grep -x "en-US-EmmaMultilingualNeural") || (echo "Voice en-US-EmmaMultilingualNeural not available in ${SPEECH_REGION}" && exit 1)
+          (cat voices.json | jq -r '.[].ShortName' | grep -x "en-US-AndrewMultilingualNeural") || (echo "Voice en-US-AndrewMultilingualNeural not available in ${SPEECH_REGION}" && exit 1)
+          echo "Both target voices are available."
 
       - name: Debug posts folder
         run: |
@@ -50,14 +66,13 @@ jobs:
           SPEECH_REGION: ${{ secrets.SPEECH_REGION }}
           VOICE_HOST: en-US-EmmaMultilingualNeural
           VOICE_SCI: en-US-AndrewMultilingualNeural
-          SPEED: 20%
+          SPEED: +20%     # ✅ 关键修正：必须带 + 号
         run: |
           python tts_batch.py --merge --only-full-to-docs
           echo "List outputs:"
           ls -alh tts_out || true
           ls -alh docs/audio || true
 
-      # 只提交 docs/audio（发布用）
       - name: Commit merged audio
         run: |
           git config user.name "github-actions[bot]"
