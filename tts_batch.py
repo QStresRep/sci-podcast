@@ -29,9 +29,9 @@ DEFAULT_BREAK_MS   = 250
 DEFAULT_OUTPUT_FORMAT = speechsdk.SpeechSynthesisOutputFormat.Audio24Khz160KBitRateMonoMp3
 
 # 默认 Voice（可被环境变量或 CLI 覆盖）
-VOICE_HOST_DEFAULT = "en-US-Emma:DragonHDLatestNeural"
-VOICE_SCI_DEFAULT  = "en-US-Andrew:DragonHDLatestNeural"
-RATE_DEFAULT       = "20%"
+VOICE_HOST_DEFAULT = "en-US-EmmaMultilingualNeural"
+VOICE_SCI_DEFAULT  = "en-US-AndrewMultilingualNeural"
+RATE_DEFAULT       = "30%"
 
 # 角色行匹配
 ROLE_LINE_PAT = re.compile(r'^(host|scientist)\s*:\s*(.+)$', re.I)
@@ -42,7 +42,7 @@ def canonicalize_voice(v: str | None, fallback: str) -> str:
     if not v:
         return fallback
     v = v.strip()
-    if ":" in v:  # 如 "en-US-Emma:DragonHDLatestNeural"
+    if ":" in v:  # 处理 "en-US-Emma:DragonHDLatestNeural" 这类值
         v = v.split(":", 1)[0].strip()
     if " " in v and not v.endswith("Neural"):
         v = v.split(" ", 1)[0].strip()
@@ -71,7 +71,7 @@ def parse_role_line(line: str, voice_host: str, voice_sci: str) -> Tuple[str, st
         return voice, content
     return voice_host, line.strip()
 
-def to_sentences(text: str) -> List[str]:
+def to_sentences(text: str):
     return [seg.strip() for seg in SENT_SPLIT.split(text) if seg and seg.strip()]
 
 def build_dialog_items(body: str, voice_host: str, voice_sci: str):
@@ -130,17 +130,13 @@ def build_ssml_from_chunk(chunk, rate: str, break_ms: int) -> str:
     parts = []
     for voice, sents in chunk:
         inner = "".join(
-            f"<s>{html.escape(seg)}</s><break time='{break_ms}ms'/>"
+            "<s>" + html.escape(seg) + "</s><break time='" + str(break_ms) + "ms'/>"
             for seg in sents
         )
         parts.append(
-            f'<voice name="{voice}"><prosody rate="{html.escape(rate)}">{inner}</prosody></voice>'
+            '<voice name="' + voice + '"><prosody rate="' + html.escape(rate) + '">' + inner + "</prosody></voice>"
         )
-    return (
-        '<speak version="1.0" xml:lang="en-US">'
-        + "".join(parts)
-        + "</speak>"
-    )
+    return '<speak version="1.0" xml:lang="en-US">' + "".join(parts) + "</speak>"
 
 def synth_ssml(ssml: str, out_path: str, prefer_voice_for_config: str, output_format):
     """实际调用 Azure 合成，并打印详细取消信息"""
@@ -161,15 +157,15 @@ def synth_ssml(ssml: str, out_path: str, prefer_voice_for_config: str, output_fo
             details = speechsdk.CancellationDetails(result)
             reason = details.reason
             err = details.error_details
-            raise RuntimeError(f"TTS canceled: reason={reason} | error={err}")
+            raise RuntimeError("TTS canceled: reason=" + str(reason) + " | error=" + str(err))
         except Exception:
-            raise RuntimeError(f"TTS canceled: reason={result.reason} (no details)")
+            raise RuntimeError("TTS canceled: reason=" + str(result.reason) + " (no details)")
 
 def process_file(txt_path: pathlib.Path, out_dir: pathlib.Path, voice_host: str, voice_sci: str,
-                 rate: str, max_sents: int, max_chars: int, break_ms: int, output_format) -> List[pathlib.Path]:
+                 rate: str, max_sents: int, max_chars: int, break_ms: int, output_format):
     raw = txt_path.read_text(encoding="utf-8").splitlines()
     if len(raw) < 3:
-        print(f"[WARN] too short: {txt_path}")
+        print("[WARN] too short:", txt_path)
         return []
 
     title = (raw[0] or "Episode").strip()
@@ -181,12 +177,12 @@ def process_file(txt_path: pathlib.Path, out_dir: pathlib.Path, voice_host: str,
 
     body = sanitize_text("\n".join(raw[2:]).strip())
     if len(body) < 20:
-        print(f"[WARN] body short: {txt_path}")
+        print("[WARN] body short:", txt_path)
         return []
 
     # 生成基础输出名（避免逗号）
     safe_date = date.replace("-", "")
-    base_name = f"{safe_date}_{slugify(title)}.mp3"
+    base_name = safe_date + "_" + slugify(title) + ".mp3"
     base_out = out_dir / base_name
 
     # 解析 → 切块
@@ -194,26 +190,27 @@ def process_file(txt_path: pathlib.Path, out_dir: pathlib.Path, voice_host: str,
     chunks = chunk_dialog_items(items, max_sents=max_sents, max_chars=max_chars)
     outputs = []
 
-    print(f"[INFO] voice_host={voice_host} | voice_sci={voice_sci} | region={os.getenv('SPEECH_REGION')} | chunks={len(chunks)}")
+    print("[INFO] voice_host=" + voice_host + " | voice_sci=" + voice_sci + " | region=" + str(os.getenv('SPEECH_REGION')) + " | chunks=" + str(len(chunks)))
 
     for idx, chunk in enumerate(chunks, 1):
         ssml = build_ssml_from_chunk(chunk, rate, break_ms)
-        out_path = base_out if len(chunks) == 1 else base_out.with_name(base_out.stem + f"_part{idx}" + base_out.suffix)
-        print(f"[TTS] {txt_path} -> {out_path}")
+        out_path = base_out if len(chunks) == 1 else base_out.with_name(base_out.stem + "_part" + str(idx) + base_out.suffix)
+        print("[TTS]", txt_path, "->", out_path)
         synth_ssml(ssml, str(out_path), voice_host, output_format)
-        print(f"[OK] wrote {out_path} ({out_path.stat().st_size} bytes)")
+        print("[OK] wrote", out_path, "(", out_path.stat().st_size, "bytes )")
         outputs.append(out_path)
 
     return outputs
 
 def merge_parts_with_ffmpeg(parts: List[pathlib.Path], merged_path: pathlib.Path):
     """
-    使用 ffmpeg 无损拼接 mp3（需要系统安装 ffmpeg）。
-    若 mp3 编码参数不同或报错，可退而转码重封装。
+    先尝试无损 concat:，失败则写清单文件并重编码合并。
+    （避免 f-string 中包含反斜杠的写法）
     """
     if not parts:
         return False
-    # 方案1：快速拼接（可能受限于编码参数一致性）
+
+    # 方案1：快速无损合并
     try:
         concat_arg = "concat:" + "|".join(str(p) for p in parts)
         subprocess.run(
@@ -221,27 +218,35 @@ def merge_parts_with_ffmpeg(parts: List[pathlib.Path], merged_path: pathlib.Path
              "-i", concat_arg, "-c", "copy", str(merged_path)],
             check=True
         )
-        print(f"[OK] merged -> {merged_path}")
+        print("[OK] merged ->", merged_path)
         return True
     except Exception as e:
-        print(f"[WARN] fast concat failed, try re-encode merge: {e}")
+        print("[WARN] fast concat failed, try re-encode merge:", e)
 
-    # 方案2：重编码合并（更稳）
+    # 方案2：写清单 + 重编码
     try:
-        # 先把文件列表写到临时清单
         lst = merged_path.with_suffix(".txt")
-        lst.write_text("\n".join(f"file '{str(p).replace(\"'\", r\"'\\''\")}'" for p in parts), encoding="utf-8")
+        lines = []
+        for p in parts:
+            # 简单转义单引号，避免 shell/ffmpeg 解析问题
+            safe_path = str(p).replace("'", "'\\''")
+            lines.append("file '" + safe_path + "'")
+        lst.write_text("\n".join(lines), encoding="utf-8")
+
         subprocess.run(
             ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
              "-f", "concat", "-safe", "0", "-i", str(lst),
              "-c:a", "libmp3lame", "-b:a", "160k", str(merged_path)],
             check=True
         )
-        lst.unlink(missing_ok=True)
-        print(f"[OK] merged (re-encoded) -> {merged_path}")
+        try:
+            lst.unlink()
+        except Exception:
+            pass
+        print("[OK] merged (re-encoded) ->", merged_path)
         return True
     except Exception as e:
-        print(f"[FAIL] merge failed: {e}")
+        print("[FAIL] merge failed:", e)
         return False
 
 def main():
@@ -261,7 +266,7 @@ def main():
     out_dir = pathlib.Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
     files = sorted(glob.glob(args.input_glob))
     if not files:
-        print(f"[ERROR] No files matched: {args.input_glob}")
+        print("[ERROR] No files matched:", args.input_glob)
         sys.exit(1)
 
     output_format = (
@@ -269,7 +274,8 @@ def main():
         if args.use_48k else DEFAULT_OUTPUT_FORMAT
     )
 
-    print(f"[INFO] input_glob={args.input_glob} | out_dir={out_dir} | max_sents={args.max_sents} | max_chars={args.max_chars}")
+    print("[INFO] input_glob=" + args.input_glob + " | out_dir=" + str(out_dir) +
+          " | max_sents=" + str(args.max_sents) + " | max_chars=" + str(args.max_chars))
 
     total_parts = 0
     failures = []
@@ -291,7 +297,7 @@ def main():
                 if merge_parts_with_ffmpeg(outs, merged):
                     merged_outputs.append(merged)
         except Exception as e:
-            print(f"[FAIL] {p}: {e}")
+            print("[FAIL]", p, ":", e)
             failures.append((str(p), str(e)))
 
     if total_parts == 0:
@@ -299,18 +305,18 @@ def main():
         if failures:
             print("\nSummary of failures:")
             for f, msg in failures:
-                print(f" - {f}: {msg}")
+                print(" -", f, ":", msg)
         sys.exit(1)
 
     if failures:
         print("\nSummary of failures:")
         for f, msg in failures:
-            print(f" - {f}: {msg}")
+            print(" -", f, ":", msg)
 
     if merged_outputs:
         print("\nMerged outputs:")
         for m in merged_outputs:
-            print(f" - {m}")
+            print(" -", m)
 
 if __name__ == "__main__":
     main()
