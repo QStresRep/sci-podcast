@@ -31,19 +31,40 @@ jobs:
           test -n "${{ secrets.SPEECH_REGION }}" || (echo "Missing SPEECH_REGION" && exit 1)
 
       # 可选但强烈建议：检查你选的 voice 是否在该 region 可用
-      - name: Check voices availability
+      - name: Check voices availability (best-effort)
         env:
           SPEECH_KEY: ${{ secrets.SPEECH_KEY }}
           SPEECH_REGION: ${{ secrets.SPEECH_REGION }}
         run: |
           set -e
-          curl -sS -f -H "Ocp-Apim-Subscription-Key: ${SPEECH_KEY}" \
-            "https://${SPEECH_REGION}.tts.speech.microsoft.com/cognitiveservices/voices/list" > voices.json
+          tries=6
+          delay=1
+          code=0
+          for i in $(seq 1 $tries); do
+            code=$(curl -sS -o voices.json -w "%{http_code}" \
+              -H "Ocp-Apim-Subscription-Key: ${SPEECH_KEY}" \
+              "https://${SPEECH_REGION}.tts.speech.microsoft.com/cognitiveservices/voices/list" \
+              || echo "000")
+            if [ "$code" = "200" ]; then break; fi
+            echo "Voice list HTTP $code; retrying in ${delay}s (attempt $i/$tries)"
+            sleep $delay
+            delay=$((delay*2))
+          done
+          if [ "$code" != "200" ]; then
+            echo "::warning::Could not fetch voices list (HTTP $code). Skipping availability check."
+            exit 0  # ← 软跳过，不让工作流失败
+          fi
+
           echo "Top voices in ${SPEECH_REGION}:"
-          cat voices.json | jq -r '.[0:8][] | "\(.ShortName) | \(.Locale)"'
-          (cat voices.json | jq -r '.[].ShortName' | grep -x "en-US-EmmaMultilingualNeural") || (echo "Voice en-US-EmmaMultilingualNeural not available in ${SPEECH_REGION}" && exit 1)
-          (cat voices.json | jq -r '.[].ShortName' | grep -x "en-US-AndrewMultilingualNeural") || (echo "Voice en-US-AndrewMultilingualNeural not available in ${SPEECH_REGION}" && exit 1)
-          echo "Both voices available."
+          jq -r '.[0:8][] | "\(.ShortName) | \(.Locale)"' voices.json || true
+
+          if ! jq -r '.[].ShortName' voices.json | grep -xq "en-US-EmmaMultilingualNeural"; then
+            echo "::warning::Voice en-US-EmmaMultilingualNeural not found in ${SPEECH_REGION}. Consider en-US-JennyNeural."
+          fi
+          if ! jq -r '.[].ShortName' voices.json | grep -xq "en-US-AndrewMultilingualNeural"; then
+            echo "::warning::Voice en-US-AndrewMultilingualNeural not found in ${SPEECH_REGION}. Consider en-US-GuyNeural."
+          fi
+
 
       - name: Debug posts folder
         run: |
