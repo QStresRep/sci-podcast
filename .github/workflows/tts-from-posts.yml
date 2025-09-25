@@ -12,30 +12,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install azure-cognitiveservices-speech
 
-      - name: Install ffmpeg
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
-
       - name: Run TTS batch
-        run: |
-          python tts_batch.py --merge --only-full-to-docs --retries 8 --retry-base 1.0 --retry-jitter 0.8
         env:
           SPEECH_KEY: ${{ secrets.SPEECH_KEY }}
           SPEECH_REGION: ${{ secrets.SPEECH_REGION }}
-          VOICE_HOST: en-US-EmmaMultilingualNeural
+          VOICE_HOST: en-US-EmmaDragonHDLatestNeural
           VOICE_SCI: en-US-AndrewMultilingualNeural
-          SPEED: 30%
+          SPEED: 20%
+        run: |
+          python tts_batch.py --merge --only-full-to-docs
 
       - name: Commit merged TTS outputs
         run: |
