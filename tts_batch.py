@@ -1,13 +1,21 @@
 # -*- coding: utf-8 -*-
 """
-Azure Speech TTS 批处理脚本（长文分段版）
-- 处理 posts/*.txt：第1行=标题；第2行如以 "Date:" 开头则识别日期，否则用今天；其余为正文
-- 正文支持以 "Host:" / "Scientist:" 开头的行来切换说话人（不同 voice）
-- 自动清理零宽/控制字符；按句分段（句数 & 字符数双阈值）；逐段合成 MP3
-- 失败时打印 CancellationDetails；可选用 ffmpeg 合并分段
-- 新增参数 --only-full-to-docs：只把 *_full.mp3 复制到 docs/audio
-- 修复：当只有 1 段时也会生成 *_full.mp3，避免 --only-full-to-docs 时无文件可复制
-- 修复：当存在失败时以非零退出码结束，CI 不再“静默成功”
+Azure Speech TTS 批处理脚本（长文分段版，稳健修复版）
+
+功能要点
+- 输入：posts/*.txt
+  * 第1行=标题
+  * 第2行若以 "Date:" 开头则取该日期，否则用今天
+  * 第3行起为正文；支持以 "Host:" / "Scientist:" 开头的行以切换说话人
+- 文本预处理：清理零宽/控制字符；按句分段（句数 & 字符数双阈值）
+- 合成：每段生成 mp3；支持 --merge 用 ffmpeg 合并
+- 发布：--only-full-to-docs 时仅复制 *_full.mp3 到 docs/audio
+- 重要修复：
+  1) 取消详情可见：打印 CancellationDetails（含 error_code / details）
+  2) 单段文本也会生成 *_full.mp3（避免 only-full 时无文件）
+  3) 日期/标题均 slug 化，文件名不含空格/逗号
+  4) 对 rate 做规范化：若传入 "20%" 自动改为 "+20%"，避免 SSML 校验报错
+  5) 有失败或无产物时以非零退出码结束，CI 不再“假成功”
 """
 
 import os, re, html, datetime, pathlib, sys, glob, unicodedata, argparse, subprocess, time, shutil
@@ -19,6 +27,7 @@ except Exception as e:
     print("[ERROR] Missing package 'azure-cognitiveservices-speech':", e)
     sys.exit(1)
 
+# ------------------------ 可调默认值 ------------------------
 DEFAULT_INPUT_GLOB = "posts/*.txt"
 DEFAULT_OUT_DIR    = "tts_out"
 DEFAULT_MAX_SENTS  = 100
@@ -29,11 +38,12 @@ DEFAULT_OUTPUT_FORMAT = speechsdk.SpeechSynthesisOutputFormat.Audio24Khz160KBitR
 
 VOICE_HOST_DEFAULT = "en-US-EmmaMultilingualNeural"
 VOICE_SCI_DEFAULT  = "en-US-AndrewMultilingualNeural"
-RATE_DEFAULT       = "+20%"   # ✅ 更稳妥
+RATE_DEFAULT       = "+20%"  # ✅ 更稳妥；如传入 "20%" 会自动规范为 "+20%"
 
 ROLE_LINE_PAT = re.compile(r'^(host|scientist)\s*:\s*(.+)$', re.I)
 SENT_SPLIT = re.compile(r'(?<=[\.\?\!。！？])\s+')
 
+# ------------------------ 工具函数 ------------------------
 def canonicalize_voice(v: str | None, fallback: str) -> str:
     if not v:
         return fallback
@@ -44,6 +54,17 @@ def canonicalize_voice(v: str | None, fallback: str) -> str:
         v = v.split(" ", 1)[0].strip()
     return v or fallback
 
+def canonicalize_rate(r: str | None) -> str:
+    """把 '20%' 正常化为 '+20%'；允许 '+10%', '-10%', '0%', 也允许 'default' 等非百分比值原样返回。"""
+    if not r:
+        return RATE_DEFAULT
+    r = r.strip()
+    if re.fullmatch(r'[+-]?\d+%', r):
+        if r.startswith(("+", "-")):
+            return r
+        return "+" + r  # '20%' -> '+20%'
+    return r
+
 def sanitize_text(s: str) -> str:
     s = s.replace("\r\n", "\n").replace("\r", "\n")
     for z in ("\u200b", "\u200c", "\u200d", "\ufeff", "\u2060"):
@@ -52,8 +73,11 @@ def sanitize_text(s: str) -> str:
     return unicodedata.normalize("NFC", s)
 
 def slugify(s: str) -> str:
-    s = s.strip().lower().replace(" ", "-")
-    return re.sub(r"[^a-z0-9_-]+", "-", s)[:80].strip("-") or "episode"
+    s = s.strip().lower()
+    s = s.replace(" ", "-")
+    s = re.sub(r"[^a-z0-9_-]+", "-", s)
+    s = re.sub(r"-{2,}", "-", s)
+    return (s[:80].strip("-")) or "episode"
 
 def parse_role_line(line: str, voice_host: str, voice_sci: str) -> Tuple[str, str]:
     m = ROLE_LINE_PAT.match(line)
@@ -136,7 +160,14 @@ def synth_ssml(ssml: str, out_path: str, prefer_voice_for_config: str, output_fo
         if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
             return
         else:
-            print(f"[WARN] attempt {attempt} failed, reason={result.reason}")
+            if result.reason == speechsdk.ResultReason.Canceled:
+                cd = result.cancellation_details
+                # ✅ 打印更具体的取消原因，便于排错
+                print(f"[WARN] attempt {attempt} canceled. reason={getattr(cd,'reason',None)} "
+                      f"error_code={getattr(cd,'error_code',None)}")
+                print(f"[WARN] details: {getattr(cd,'error_details','')}")
+            else:
+                print(f"[WARN] attempt {attempt} failed, reason={result.reason}")
             if attempt < max_retries:
                 time.sleep(1.5 * attempt)
     raise RuntimeError(f"TTS failed after {max_retries} retries -> {out_path}")
@@ -160,7 +191,7 @@ def process_file(txt_path: pathlib.Path, out_dir: pathlib.Path, voice_host: str,
         print("[WARN] body short:", txt_path)
         return []
 
-    safe_date = date.replace("-", "")
+    safe_date = slugify(date)  # ✅ 日期也 slug 化（如 "September 25, 2025" -> "september-25-2025"）
     base_name = safe_date + "_" + slugify(title) + ".mp3"
     base_out = out_dir / base_name
 
@@ -176,7 +207,7 @@ def process_file(txt_path: pathlib.Path, out_dir: pathlib.Path, voice_host: str,
         print("[TTS]", txt_path, "->", out_path)
         synth_ssml(ssml, str(out_path), voice_host, output_format)
         outputs.append(out_path)
-        time.sleep(0.2)
+        time.sleep(0.2)  # 轻量 backoff，降低速率限制风险
 
     return outputs
 
@@ -200,6 +231,7 @@ def merge_parts_with_ffmpeg(parts: List[pathlib.Path], merged_path: pathlib.Path
         print("[FAIL] merge failed:", e)
         return False
 
+# ------------------------ 入口 ------------------------
 def main():
     ap = argparse.ArgumentParser(description="Azure Speech TTS batch (long-text segmented).")
     ap.add_argument("--input-glob", default=os.getenv("INPUT_GLOB", DEFAULT_INPUT_GLOB))
@@ -216,7 +248,12 @@ def main():
                     help="Copy only *_full.mp3 into docs/audio (for publishing).")
     args = ap.parse_args()
 
+    # 目录准备
     out_dir = pathlib.Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
+
+    # 规范化 rate，避免 '20%' 被 SSML 拒绝
+    args.rate = canonicalize_rate(args.rate)
+
     files = sorted(glob.glob(args.input_glob))
     if not files:
         print("[ERROR] No files matched:", args.input_glob)
@@ -240,16 +277,13 @@ def main():
                 break_ms=args.break_ms, output_format=output_format
             )
 
-            # ✅ 若 --merge：
-            #  - 多段：用 ffmpeg 合成 *_full.mp3
-            #  - 单段：复制为 *_full.mp3（确保 --only-full-to-docs 时也有文件）
             if args.merge and outs:
                 if len(outs) > 1:
                     merged = outs[0].with_name(outs[0].stem.replace("_part1", "") + "_full.mp3")
                     if merge_parts_with_ffmpeg(outs, merged):
                         merged_outputs.append(merged)
                 else:
-                    # 只有单段时，把该段复制成 *_full.mp3
+                    # ✅ 单段也生成 *_full.mp3
                     src = outs[0]
                     merged = src.with_name(src.stem + "_full.mp3")
                     try:
@@ -272,7 +306,7 @@ def main():
         for m in merged_outputs:
             print(" -", m)
 
-    # ✅ 复制 full 到 docs/audio
+    # 复制 full 到 docs/audio
     if args.only_full_to_docs and merged_outputs:
         docs_dir = pathlib.Path("docs/audio")
         docs_dir.mkdir(parents=True, exist_ok=True)
@@ -285,7 +319,7 @@ def main():
                 print("[FAIL] copy to docs/audio failed:", e)
                 failures.append((str(f), f"copy failed: {e}"))
 
-    # ✅ 明确失败/无产物时退出 1
+    # 失败/无产物 → 退出 1
     if failures:
         print("\nSome files failed:")
         for f, e in failures:
