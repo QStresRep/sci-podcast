@@ -1,21 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-Azure Speech TTS 批处理脚本（长文分段版，稳健修复版）
+Azure Speech TTS 批处理脚本（长文分段版，HD 兼容稳健版）
 
-功能要点
-- 输入：posts/*.txt
-  * 第1行=标题
-  * 第2行若以 "Date:" 开头则取该日期，否则用今天
-  * 第3行起为正文；支持以 "Host:" / "Scientist:" 开头的行以切换说话人
-- 文本预处理：清理零宽/控制字符；按句分段（句数 & 字符数双阈值）
-- 合成：每段生成 mp3；支持 --merge 用 ffmpeg 合并
-- 发布：--only-full-to-docs 时仅复制 *_full.mp3 到 docs/audio
-- 重要修复：
-  1) 取消详情可见：打印 CancellationDetails（含 error_code / details）
-  2) 单段文本也会生成 *_full.mp3（避免 only-full 时无文件）
-  3) 日期/标题均 slug 化，文件名不含空格/逗号
-  4) 对 rate 做规范化：若传入 "20%" 自动改为 "+20%"，避免 SSML 校验报错
-  5) 有失败或无产物时以非零退出码结束，CI 不再“假成功”
+要点：
+- 支持 posts/*.txt：第1行标题；第2行可选 "Date:"；第3行起正文
+- 支持 Host:/Scientist: 分角色说话
+- 自动清理非法字符、按句分块；逐块合成 MP3；可用 ffmpeg 合并
+- --only-full-to-docs：只复制 *_full.mp3 到 docs/audio
+- ✅ HD 兼容：若 voice 名含 ":DragonHD"（冒号 HD 声线），则不使用 <prosody>/<break>，避免 InvalidSsml
+- ✅ 保留冒号：不再截断含冒号的 voice 名
+- ✅ 速率规范：'20%' 自动转 '+20%'；HD 分支忽略速率（不套 <prosody>）
+- ✅ 单段也会产 *_full.mp3
+- ✅ 打印 CancellationDetails（error_code/details）
+- ✅ 无产物或失败则退出码=1
 """
 
 import os, re, html, datetime, pathlib, sys, glob, unicodedata, argparse, subprocess, time, shutil
@@ -27,7 +24,7 @@ except Exception as e:
     print("[ERROR] Missing package 'azure-cognitiveservices-speech':", e)
     sys.exit(1)
 
-# ------------------------ 可调默认值 ------------------------
+# ------------------------ 默认参数 ------------------------
 DEFAULT_INPUT_GLOB = "posts/*.txt"
 DEFAULT_OUT_DIR    = "tts_out"
 DEFAULT_MAX_SENTS  = 100
@@ -38,31 +35,27 @@ DEFAULT_OUTPUT_FORMAT = speechsdk.SpeechSynthesisOutputFormat.Audio24Khz160KBitR
 
 VOICE_HOST_DEFAULT = "en-US-EmmaMultilingualNeural"
 VOICE_SCI_DEFAULT  = "en-US-AndrewMultilingualNeural"
-RATE_DEFAULT       = "+20%"  # ✅ 更稳妥；如传入 "20%" 会自动规范为 "+20%"
+RATE_DEFAULT       = "+20%"  # 若传入 "20%" 自动转成 "+20%"
 
 ROLE_LINE_PAT = re.compile(r'^(host|scientist)\s*:\s*(.+)$', re.I)
 SENT_SPLIT = re.compile(r'(?<=[\.\?\!。！？])\s+')
 
 # ------------------------ 工具函数 ------------------------
 def canonicalize_voice(v: str | None, fallback: str) -> str:
+    """保持原样（尤其是冒号 HD 名称），仅去除前后空白；不再截断冒号。"""
     if not v:
         return fallback
     v = v.strip()
-    if ":" in v:
-        v = v.split(":", 1)[0].strip()
-    if " " in v and not v.endswith("Neural"):
-        v = v.split(" ", 1)[0].strip()
+    # 旧逻辑会切掉冒号后的部分，这里不要这么做
     return v or fallback
 
 def canonicalize_rate(r: str | None) -> str:
-    """把 '20%' 正常化为 '+20%'；允许 '+10%', '-10%', '0%', 也允许 'default' 等非百分比值原样返回。"""
+    """把 '20%' 正常化为 '+20%'；允许 '+10%', '-10%', '0%'，其余原样返回。"""
     if not r:
         return RATE_DEFAULT
     r = r.strip()
     if re.fullmatch(r'[+-]?\d+%', r):
-        if r.startswith(("+", "-")):
-            return r
-        return "+" + r  # '20%' -> '+20%'
+        return r if r.startswith(("+", "-")) else ("+" + r)
     return r
 
 def sanitize_text(s: str) -> str:
@@ -73,8 +66,7 @@ def sanitize_text(s: str) -> str:
     return unicodedata.normalize("NFC", s)
 
 def slugify(s: str) -> str:
-    s = s.strip().lower()
-    s = s.replace(" ", "-")
+    s = s.strip().lower().replace(" ", "-")
     s = re.sub(r"[^a-z0-9_-]+", "-", s)
     s = re.sub(r"-{2,}", "-", s)
     return (s[:80].strip("-")) or "episode"
@@ -103,10 +95,8 @@ def build_dialog_items(body: str, voice_host: str, voice_sci: str):
     return items
 
 def chunk_dialog_items(items, max_sents: int, max_chars: int):
-    chunks = []
-    cur = []
-    sent_count = 0
-    char_count = 0
+    chunks, cur = [], []
+    sent_count = char_count = 0
 
     def flush():
         nonlocal cur, sent_count, char_count
@@ -127,20 +117,29 @@ def chunk_dialog_items(items, max_sents: int, max_chars: int):
                 cur.append((voice, [s]))
             sent_count += 1
             char_count += s_len
-
     flush()
     return chunks
+
+def is_hd_voice(voice_name: str) -> bool:
+    """简单判断：含 ':DragonHD' 的视为 HD 声线。"""
+    return ":DragonHD" in voice_name
 
 def build_ssml_from_chunk(chunk, rate: str, break_ms: int) -> str:
     parts = []
     for voice, sents in chunk:
-        inner = "".join(
-            "<s>" + html.escape(seg) + "</s><break time='" + str(break_ms) + "ms'/>"
-            for seg in sents
-        )
-        parts.append(
-            '<voice name="' + voice + '"><prosody rate="' + html.escape(rate) + '">' + inner + "</prosody></voice>"
-        )
+        if is_hd_voice(voice):
+            # ⚠️ HD：不要用 <prosody> / <break>，避免 InvalidSsml
+            inner = "".join("<s>" + html.escape(seg) + "</s>" for seg in sents)
+            parts.append(f'<voice name="{html.escape(voice)}">{inner}</voice>')
+        else:
+            # 常规：可用 prosody / break
+            inner = "".join(
+                "<s>" + html.escape(seg) + f"</s><break time='{int(break_ms)}ms'/>"
+                for seg in sents
+            )
+            parts.append(
+                f'<voice name="{html.escape(voice)}"><prosody rate="{html.escape(rate)}">{inner}</prosody></voice>'
+            )
     return '<speak version="1.0" xml:lang="en-US">' + "".join(parts) + "</speak>"
 
 def synth_ssml(ssml: str, out_path: str, prefer_voice_for_config: str, output_format):
@@ -148,6 +147,7 @@ def synth_ssml(ssml: str, out_path: str, prefer_voice_for_config: str, output_fo
     if not key or not region:
         raise SystemExit("Missing SPEECH_KEY / SPEECH_REGION secrets.")
     speech_config = speechsdk.SpeechConfig(subscription=key, region=region)
+    # 这里设置一个默认 voice；具体 SSML 内部会按 <voice name="..."> 覆盖
     speech_config.speech_synthesis_voice_name = prefer_voice_for_config
     speech_config.set_speech_synthesis_output_format(output_format)
 
@@ -162,7 +162,6 @@ def synth_ssml(ssml: str, out_path: str, prefer_voice_for_config: str, output_fo
         else:
             if result.reason == speechsdk.ResultReason.Canceled:
                 cd = result.cancellation_details
-                # ✅ 打印更具体的取消原因，便于排错
                 print(f"[WARN] attempt {attempt} canceled. reason={getattr(cd,'reason',None)} "
                       f"error_code={getattr(cd,'error_code',None)}")
                 print(f"[WARN] details: {getattr(cd,'error_details','')}")
@@ -191,7 +190,7 @@ def process_file(txt_path: pathlib.Path, out_dir: pathlib.Path, voice_host: str,
         print("[WARN] body short:", txt_path)
         return []
 
-    safe_date = slugify(date)  # ✅ 日期也 slug 化（如 "September 25, 2025" -> "september-25-2025"）
+    safe_date = slugify(date)  # 例如 "September 25, 2025" -> "september-25-2025"
     base_name = safe_date + "_" + slugify(title) + ".mp3"
     base_out = out_dir / base_name
 
@@ -207,8 +206,7 @@ def process_file(txt_path: pathlib.Path, out_dir: pathlib.Path, voice_host: str,
         print("[TTS]", txt_path, "->", out_path)
         synth_ssml(ssml, str(out_path), voice_host, output_format)
         outputs.append(out_path)
-        time.sleep(0.2)  # 轻量 backoff，降低速率限制风险
-
+        time.sleep(0.2)
     return outputs
 
 def merge_parts_with_ffmpeg(parts: List[pathlib.Path], merged_path: pathlib.Path):
@@ -231,7 +229,7 @@ def merge_parts_with_ffmpeg(parts: List[pathlib.Path], merged_path: pathlib.Path
         print("[FAIL] merge failed:", e)
         return False
 
-# ------------------------ 入口 ------------------------
+# ------------------------ main ------------------------
 def main():
     ap = argparse.ArgumentParser(description="Azure Speech TTS batch (long-text segmented).")
     ap.add_argument("--input-glob", default=os.getenv("INPUT_GLOB", DEFAULT_INPUT_GLOB))
@@ -248,10 +246,9 @@ def main():
                     help="Copy only *_full.mp3 into docs/audio (for publishing).")
     args = ap.parse_args()
 
-    # 目录准备
     out_dir = pathlib.Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 规范化 rate，避免 '20%' 被 SSML 拒绝
+    # 规范化 rate（'20%' -> '+20%'）
     args.rate = canonicalize_rate(args.rate)
 
     files = sorted(glob.glob(args.input_glob))
@@ -276,14 +273,12 @@ def main():
                 rate=args.rate, max_sents=args.max_sents, max_chars=args.max_chars,
                 break_ms=args.break_ms, output_format=output_format
             )
-
             if args.merge and outs:
                 if len(outs) > 1:
                     merged = outs[0].with_name(outs[0].stem.replace("_part1", "") + "_full.mp3")
                     if merge_parts_with_ffmpeg(outs, merged):
                         merged_outputs.append(merged)
                 else:
-                    # ✅ 单段也生成 *_full.mp3
                     src = outs[0]
                     merged = src.with_name(src.stem + "_full.mp3")
                     try:
@@ -306,7 +301,6 @@ def main():
         for m in merged_outputs:
             print(" -", m)
 
-    # 复制 full 到 docs/audio
     if args.only_full_to_docs and merged_outputs:
         docs_dir = pathlib.Path("docs/audio")
         docs_dir.mkdir(parents=True, exist_ok=True)
@@ -319,7 +313,6 @@ def main():
                 print("[FAIL] copy to docs/audio failed:", e)
                 failures.append((str(f), f"copy failed: {e}"))
 
-    # 失败/无产物 → 退出 1
     if failures:
         print("\nSome files failed:")
         for f, e in failures:
