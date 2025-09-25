@@ -1,3 +1,12 @@
-# Ignore generated TTS parts
+# Build / editor
+__pycache__/
+*.pyc
+*.log
+
+# Ignore generated TTS parts (debug-only artifacts)
 tts_out/
-tts_out/
+
+# Keep published audio
+!docs/
+!docs/audio/
+!docs/audio/*.mp3
