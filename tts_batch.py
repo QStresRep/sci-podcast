@@ -1,12 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-Azure Speech TTS 批处理脚本（长文分段版，带重试机制）
-- 处理 posts/*.txt：第1行=标题；第2行如以 "Date:" 开头则识别日期，否则用今天；其余为正文
-- 正文支持以 "Host:" / "Scientist:" 开头的行来切换说话人（不同 voice）
-- 自动清理零宽/控制字符；按句分段（句数 & 字符数双阈值）；逐段合成 MP3
-- 失败时打印 CancellationDetails；可选用 ffmpeg 合并分段
-- 新增参数 --only-full-to-docs：只把 *_full.mp3 复制到 docs/audio
-- 新增参数 --retries：失败时自动重试（指数退避 + 随机抖动）
+Azure Speech TTS 批处理脚本（长文分段版，带超限兜底）
+- 默认分块更小 (max_sents=40, max_chars=3000)
+- 自动检测 SSML 长度超过 AZURE_SSML_LIMIT 时再细分
+- 确保不会因为超长而触发 Azure Canceled
+- 失败时重试；可选合并；支持只把 *_full.mp3 放到 docs/audio
 """
 
 import os, re, html, datetime, pathlib, sys, glob, unicodedata, argparse, subprocess, time, random
@@ -18,10 +16,13 @@ except Exception as e:
     print("[ERROR] Missing package 'azure-cognitiveservices-speech':", e)
     sys.exit(1)
 
+# =========================
+# 默认参数
+# =========================
 DEFAULT_INPUT_GLOB = "posts/*.txt"
 DEFAULT_OUT_DIR    = "tts_out"
-DEFAULT_MAX_SENTS  = 120
-DEFAULT_MAX_CHARS  = 8000
+DEFAULT_MAX_SENTS  = 40     # ⚠️ 比原来小
+DEFAULT_MAX_CHARS  = 3000   # ⚠️ 比原来小
 DEFAULT_BREAK_MS   = 250
 
 DEFAULT_OUTPUT_FORMAT = speechsdk.SpeechSynthesisOutputFormat.Audio24Khz160KBitRateMonoMp3
@@ -29,6 +30,9 @@ DEFAULT_OUTPUT_FORMAT = speechsdk.SpeechSynthesisOutputFormat.Audio24Khz160KBitR
 VOICE_HOST_DEFAULT = "en-US-EmmaMultilingualNeural"
 VOICE_SCI_DEFAULT  = "en-US-AndrewMultilingualNeural"
 RATE_DEFAULT       = "30%"
+
+# ✅ Azure 官方限制 ~5000 字符，这里留 buffer
+AZURE_SSML_LIMIT = 4500
 
 ROLE_LINE_PAT = re.compile(r'^(host|scientist)\s*:\s*(.+)$', re.I)
 SENT_SPLIT = re.compile(r'(?<=[\.\?\!。！？])\s+')
@@ -118,8 +122,27 @@ def build_ssml_from_chunk(chunk, rate: str, break_ms: int) -> str:
         )
     return '<speak version="1.0" xml:lang="en-US">' + "".join(parts) + "</speak>"
 
+def split_chunk_by_chars(chunk_pairs, rate, break_ms, limit):
+    """把超长的 chunk 再按字符数切分"""
+    small_chunks, cur, cur_len = [], [], 0
+    def sent_to_len(s): return len(s) + 32
+    for voice, sents in chunk_pairs:
+        for s in sents:
+            add_len = sent_to_len(s)
+            if cur and cur_len + add_len > limit:
+                small_chunks.append(cur)
+                cur, cur_len = [], 0
+            if cur and cur[-1][0] == voice:
+                cur[-1][1].append(s)
+            else:
+                cur.append((voice, [s]))
+            cur_len += add_len
+    if cur:
+        small_chunks.append(cur)
+    return small_chunks
+
 def synth_ssml(ssml: str, out_path: str, prefer_voice_for_config: str, output_format,
-               retries: int, retry_base: float, retry_jitter: float):
+               retries=5, retry_base=1.5, retry_jitter=0.5):
     key = os.getenv("SPEECH_KEY"); region = os.getenv("SPEECH_REGION")
     if not key or not region:
         raise SystemExit("Missing SPEECH_KEY / SPEECH_REGION secrets.")
@@ -133,28 +156,21 @@ def synth_ssml(ssml: str, out_path: str, prefer_voice_for_config: str, output_fo
     for attempt in range(1, retries + 1):
         print(f"[DEBUG] synth attempt={attempt} ssml_len={len(ssml)} -> {out_path}")
         result = synthesizer.speak_ssml_async(ssml).get()
-
         if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
             return
-
-        # 失败 → 打印 details 并等待重试
-        try:
-            details = speechsdk.CancellationDetails(result)
-            print(f"[FAIL segment] {out_path} : reason={details.reason} error={details.error_details}")
-        except Exception:
-            print(f"[FAIL segment] {out_path} : reason={result.reason}")
-
+        print(f"[WARN] attempt {attempt} failed, reason={result.reason}")
         if attempt < retries:
             delay = retry_base * (2 ** (attempt - 1))
-            delay = delay * (0.9 + random.random() * retry_jitter)  # 加点随机性
+            delay += random.uniform(-retry_jitter, retry_jitter) * delay
+            delay = max(1.0, delay)
             print(f"[INFO] retrying after {delay:.2f}s ...")
             time.sleep(delay)
-
-    raise RuntimeError(f"TTS failed after {retries} retries -> {out_path}")
+        else:
+            raise RuntimeError(f"TTS failed after {retries} retries -> {out_path}")
 
 def process_file(txt_path: pathlib.Path, out_dir: pathlib.Path, voice_host: str, voice_sci: str,
                  rate: str, max_sents: int, max_chars: int, break_ms: int, output_format,
-                 retries: int, retry_base: float, retry_jitter: float):
+                 retries=5, retry_base=1.5, retry_jitter=0.5):
     raw = txt_path.read_text(encoding="utf-8").splitlines()
     if len(raw) < 3:
         print("[WARN] too short:", txt_path)
@@ -184,6 +200,18 @@ def process_file(txt_path: pathlib.Path, out_dir: pathlib.Path, voice_host: str,
 
     for idx, chunk in enumerate(chunks, 1):
         ssml = build_ssml_from_chunk(chunk, rate, break_ms)
+        # ⚠️ 如果超长，再切
+        if len(ssml) > AZURE_SSML_LIMIT:
+            sub_chunks = split_chunk_by_chars(chunk, rate, break_ms, AZURE_SSML_LIMIT - 500)
+            for j, sub in enumerate(sub_chunks, 1):
+                sub_ssml = build_ssml_from_chunk(sub, rate, break_ms)
+                out_path = base_out.with_name(f"{base_out.stem}_part{idx}_{j}{base_out.suffix}")
+                print("[TTS]", txt_path, "->", out_path)
+                synth_ssml(sub_ssml, str(out_path), voice_host, output_format, retries, retry_base, retry_jitter)
+                print("[OK] wrote", out_path, "(", out_path.stat().st_size, "bytes )")
+                outputs.append(out_path)
+            continue
+
         out_path = base_out if len(chunks) == 1 else base_out.with_name(base_out.stem + "_part" + str(idx) + base_out.suffix)
         print("[TTS]", txt_path, "->", out_path)
         synth_ssml(ssml, str(out_path), voice_host, output_format, retries, retry_base, retry_jitter)
@@ -238,9 +266,9 @@ def main():
     ap.add_argument("--use-48k",    action="store_true", help="Use 48k/192k MP3 output instead of default 24k/160k.")
     ap.add_argument("--only-full-to-docs", action="store_true",
                     help="Copy only *_full.mp3 into docs/audio (for publishing).")
-    ap.add_argument("--retries", type=int, default=5, help="Number of retries per segment on failure.")
-    ap.add_argument("--retry-base", type=float, default=1.0, help="Base delay (seconds) for retry backoff.")
-    ap.add_argument("--retry-jitter", type=float, default=0.8, help="Jitter factor for retry backoff.")
+    ap.add_argument("--retries", type=int, default=5)
+    ap.add_argument("--retry-base", type=float, default=1.5)
+    ap.add_argument("--retry-jitter", type=float, default=0.5)
     args = ap.parse_args()
 
     out_dir = pathlib.Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
@@ -282,7 +310,6 @@ def main():
         for m in merged_outputs:
             print(" -", m)
 
-    # ✅ 新增逻辑：复制 *_full.mp3 到 docs/audio
     if args.only_full_to_docs and merged_outputs:
         docs_dir = pathlib.Path("docs/audio")
         docs_dir.mkdir(parents=True, exist_ok=True)
