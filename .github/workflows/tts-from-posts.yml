@@ -6,6 +6,7 @@ on:
     paths:
       - "posts/**/*.txt"
       - ".github/workflows/tts-from-posts.yml"
+      - "tts_batch.py"
 
 permissions:
   contents: write
@@ -39,10 +40,15 @@ jobs:
         run: |
           python tts_batch.py --merge
 
+      - name: Move outputs into docs/audio
+        run: |
+          mkdir -p docs/audio
+          cp -r tts_out/* docs/audio/ || true
+
       - name: Commit outputs
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add tts_out
+          git add docs/audio
           git commit -m "Add TTS outputs" || echo "Nothing to commit"
           git push
