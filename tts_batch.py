@@ -22,8 +22,8 @@ except Exception as e:
 # =========================
 DEFAULT_INPUT_GLOB = "posts/*.txt"
 DEFAULT_OUT_DIR    = "tts_out"
-DEFAULT_MAX_SENTS  = 80      # 🔧 降低默认句子数
-DEFAULT_MAX_CHARS  = 4000    # 🔧 降低默认字符数
+DEFAULT_MAX_SENTS  = 80      # 降低默认句子数
+DEFAULT_MAX_CHARS  = 4000    # 降低默认字符数
 DEFAULT_BREAK_MS   = 250
 
 DEFAULT_OUTPUT_FORMAT = speechsdk.SpeechSynthesisOutputFormat.Audio24Khz160KBitRateMonoMp3
@@ -134,7 +134,7 @@ def synth_ssml(ssml: str, out_path: str, prefer_voice_for_config: str, output_fo
     audio_config = speechsdk.audio.AudioOutputConfig(filename=out_path)
     synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=audio_config)
 
-    print(f"[DEBUG] SSML length: {len(ssml)}")  # debug 输出
+    print(f"[DEBUG] SSML length: {len(ssml)}")
 
     result = synthesizer.speak_ssml_async(ssml).get()
 
@@ -154,7 +154,6 @@ def safe_synth_chunk(chunk, out_path, voice_host, rate, break_ms, output_format)
         return True
     except Exception as e:
         print("[WARN] synth failed for", out_path, ":", e)
-        # 自动拆半重试
         if len(chunk) > 1:
             mid = len(chunk) // 2
             part1, part2 = chunk[:mid], chunk[mid:]
@@ -207,18 +206,7 @@ def merge_parts_with_ffmpeg(parts: List[pathlib.Path], merged_path: pathlib.Path
     if not parts:
         return False
     try:
-        concat_arg = "concat:" + "|".join(str(p) for p in parts)
-        subprocess.run(
-            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-             "-i", concat_arg, "-c", "copy", str(merged_path)],
-            check=True
-        )
-        print("[OK] merged ->", merged_path)
-        return True
-    except Exception as e:
-        print("[WARN] fast concat failed, try re-encode:", e)
-
-    try:
+        # 永远用 concat list + re-encode，避免参数不一致导致丢段
         lst = merged_path.with_suffix(".txt")
         lines = ["file '" + str(p).replace("'", "'\\''") + "'" for p in parts]
         lst.write_text("\n".join(lines), encoding="utf-8")
@@ -289,7 +277,6 @@ def main():
         for m in merged_outputs:
             print(" -", m)
 
-    # ✅ 新增逻辑：复制 *_full.mp3 到 docs/audio
     if args.only_full_to_docs and merged_outputs:
         docs_dir = pathlib.Path("docs/audio")
         docs_dir.mkdir(parents=True, exist_ok=True)
