@@ -82,8 +82,26 @@ jobs:
         env:
           SPEECH_KEY: ${{ secrets.SPEECH_KEY }}
           SPEECH_REGION: ${{ secrets.SPEECH_REGION }}
-          VOICE_HOST: en-US-Emma:DragonHDLatestNeural    # ← 你指定的 HD 声线
-          VOICE_SCI:  en-US-Andrew:DragonHDLatestNeural     # ← 常规模块
+
+          # 你当前想用的两个 HD 声线
+          VOICE_HOST: en-US-Emma:DragonHDLatestNeural
+          VOICE_SCI:  en-US-Andrew:DragonHDLatestNeural
+
+          # 速率：HD 不支持 <prosody>，因此这个对 HD 无效；保留给将来切回 Multilingual 用
+          SPEED: +20%
+
+          # ↓↓↓ 新增：全局节流参数（必要！避免 429）
+          THROTTLE_MS: "4000"        # 每块之间固定等待（毫秒）
+          CHUNK_PAUSE_EVERY: "4"     # 每 4 块，额外长休眠
+          CHUNK_PAUSE_SECS: "20"     # 额外长休眠秒数
+          RETRIES: "10"              # 每块最多重试次数
+        run: |
+          # 降低每块复杂度（但不要过小，块少=请求少=更稳）
+          python tts_batch.py --merge --max-chars 3000 --break-ms 300 --only-full-to-docs
+          echo "List outputs:"
+          ls -alh tts_out || true
+          ls -alh docs/audio || true
+
                                               
         run: |
           # 适当降低块大小，提高稳定性；HD 不用 break，但代码已处理
