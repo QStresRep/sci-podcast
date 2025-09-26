@@ -29,13 +29,15 @@ jobs:
 
       - name: Verify Azure secrets
         run: |
+          echo "SPEECH_REGION=${{ secrets.SPEECH_REGION }}"
           test -n "${{ secrets.SPEECH_KEY }}" || (echo "Missing SPEECH_KEY" && exit 1)
           test -n "${{ secrets.SPEECH_REGION }}" || (echo "Missing SPEECH_REGION" && exit 1)
 
+      # 🔎 冒烟测试（REST，一句“Hello”）
       - name: Smoke test TTS (REST, eastus)
         env:
           SPEECH_KEY: ${{ secrets.SPEECH_KEY }}
-          SPEECH_REGION: ${{ secrets.SPEECH_REGION }}
+          SPEECH_REGION: ${{ secrets.SPEECH_REGION }}   # ← 确保是 eastus
         run: |
           set -e
           echo "Using region: ${SPEECH_REGION}"
@@ -43,7 +45,6 @@ jobs:
             "<speak version='1.0' xml:lang='en-US'>" \
             "  <voice name='en-US-EmmaMultilingualNeural'>Hello from Emma in eastus.</voice>" \
             "</speak>" > hello.ssml
-
           curl -sS -f \
             -H "Ocp-Apim-Subscription-Key: ${SPEECH_KEY}" \
             -H "Content-Type: application/ssml+xml" \
@@ -51,9 +52,7 @@ jobs:
             --data-binary @hello.ssml \
             "https://${SPEECH_REGION}.tts.speech.microsoft.com/cognitiveservices/v1" \
             -o hello.mp3
-
           ls -alh hello.mp3
-
 
       - name: Debug posts folder
         run: |
@@ -67,7 +66,7 @@ jobs:
             break
           done
 
-      # 全 Multilingual，配合适度节流（和你当前 tts_batch.py 对应）
+      # 全 Multilingual，配合适度节流（与 tts_batch.py 对应）
       - name: Run TTS batch (multilingual, throttled, eastus)
         env:
           SPEECH_KEY: ${{ secrets.SPEECH_KEY }}
