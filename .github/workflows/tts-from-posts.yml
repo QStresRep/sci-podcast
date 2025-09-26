@@ -73,8 +73,8 @@ jobs:
           SPEECH_KEY: ${{ secrets.SPEECH_KEY }}
           SPEECH_REGION: ${{ secrets.SPEECH_REGION }}
 
-          VOICE_HOST: en-US-EmmaMultilingualNeural
-          VOICE_SCI:  en-US-AndrewMultilingualNeural
+          VOICE_HOST: en-US-Emma:DragonHDLatestNeural
+          VOICE_SCI:  en-US-Andrew:DragonHDLatestNeural
           SPEED: +20%
 
           # 节流参数（稳）
