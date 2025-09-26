@@ -1,19 +1,37 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0"
-     xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
+     xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"
+     xmlns:atom="http://www.w3.org/2005/Atom">
   <channel>
     <title>QS-sci-podcast</title>
     <link>https://qstresrep.github.io/sci-podcast/</link>
     <description>Bulk Reading!</description>
     <language>en-us</language>
-    <lastBuildDate>Fri, 26 Sep 2025 06:53:51 +0000</lastBuildDate>
+    <lastBuildDate>Fri, 26 Sep 2025 07:10:00 +0000</lastBuildDate>
+    <atom:link href="https://qstresrep.github.io/sci-podcast/feed.xml" rel="self" type="application/rss+xml" />
+    <image>
+    <url>https://qstresrep.github.io/sci-podcast/cover.png</url>
+    <title>QS-sci-podcast</title>
+    <link>https://qstresrep.github.io/sci-podcast/</link>
+  </image>
+    <itunes:image href="https://qstresrep.github.io/sci-podcast/cover.png" />
+    <itunes:author>QS Sci</itunes:author>
+    <itunes:owner>
+      <itunes:name>QS Sci</itunes:name>
+      <itunes:email>you@example.com</itunes:email>
+    </itunes:owner>
+    <itunes:category text="Science" />
+    <itunes:explicit>no</itunes:explicit>
     <item>
         <title>september-25-2025_science-today_full</title>
+        <itunes:title>september-25-2025_science-today_full</itunes:title>
         <description>september-25-2025_science-today_full</description>
         <enclosure url="https://qstresrep.github.io/sci-podcast/audio/september-25-2025_science-today_full.mp3" length="65746277" type="audio/mpeg" />
         <guid isPermaLink="false">https://qstresrep.github.io/sci-podcast/audio/september-25-2025_science-today_full.mp3</guid>
-        <pubDate>Fri, 26 Sep 2025 06:53:51 +0000</pubDate>
+        <pubDate>Fri, 26 Sep 2025 07:10:00 +0000</pubDate>
         <itunes:duration>1:08:29</itunes:duration>
+        <itunes:episodeType>full</itunes:episodeType>
+        <itunes:explicit>no</itunes:explicit>
       </item>
   </channel>
 </rss>
