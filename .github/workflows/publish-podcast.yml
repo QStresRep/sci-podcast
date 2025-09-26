@@ -13,6 +13,17 @@ on:
 permissions:
   contents: write
 
+env:
+  # 可按需改成你的站点根（必须是能公开访问的 HTTPS 域名，末尾带 /）
+  PODCAST_SITE: https://qstresrep.github.io/sci-podcast/
+  PODCAST_TITLE: QS-sci-podcast
+  PODCAST_DESCRIPTION: Bulk Reading!
+  PODCAST_AUTHOR: QS Sci
+  PODCAST_OWNER_NAME: QS Sci
+  PODCAST_OWNER_EMAIL: you@example.com      # 建议改成你自己的联系邮箱（Apple 要求）
+  PODCAST_CATEGORY: Science                  # 可改：News, Education, Technology 等
+  PODCAST_EXPLICIT: no                       # yes / no / clean
+
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -39,34 +50,38 @@ jobs:
           done
           rmdir docs/audio_norm || true
 
-      # ② 生成 RSS feed.xml
+      # ② 生成 RSS feed.xml（补齐 iTunes 标签 + 封面 + self 链接）
       - name: Generate docs/feed.xml
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
-          import os, glob, time, subprocess, xml.sax.saxutils as xu, pathlib, json
-          from urllib.parse import quote  
+          import os, glob, time, subprocess, xml.sax.saxutils as xu, pathlib
+          from urllib.parse import quote
 
-          SITE_TITLE = os.getenv("PODCAST_TITLE", "QS-sci-podcast")
-          SITE_LINK  = "https://qstresrep.github.io/sci-podcast/"
-          SITE_DESC  = os.getenv("PODCAST_DESCRIPTION", "Bulk Reading!")
+          SITE_LINK = os.getenv("PODCAST_SITE", "").rstrip("/") + "/"
+          TITLE     = os.getenv("PODCAST_TITLE", "Podcast")
+          DESC      = os.getenv("PODCAST_DESCRIPTION", "")
+          AUTHOR    = os.getenv("PODCAST_AUTHOR", "")
+          OWNER_N   = os.getenv("PODCAST_OWNER_NAME", "")
+          OWNER_E   = os.getenv("PODCAST_OWNER_EMAIL", "")
+          CATEGORY  = os.getenv("PODCAST_CATEGORY", "Science")
+          EXPLICIT  = os.getenv("PODCAST_EXPLICIT", "no").lower()  # yes/no/clean
 
-          AUDIO_BASE = SITE_LINK.rstrip('/') + "/audio/"
-
-          # ✅ 只包含 *_full.mp3
-          files = sorted(glob.glob("docs/audio/*_full.mp3"))
+          AUDIO_BASE = SITE_LINK + "audio/"
+          FEED_URL   = SITE_LINK + "feed.xml"
+          COVER_PATH = "docs/cover.png"  # 你已放在 docs/cover.png
+          COVER_URL  = SITE_LINK + "cover.png" if pathlib.Path(COVER_PATH).exists() else ""
 
           def ffprobe_json(path):
-              cmd = ["ffprobe", "-v", "error", "-print_format", "json", "-show_format", path]
-              out = subprocess.check_output(cmd, text=True)
-              import json
+              import json, subprocess
+              out = subprocess.check_output(["ffprobe","-v","error","-print_format","json","-show_format",path], text=True)
               return json.loads(out)
 
+          files = sorted(glob.glob("docs/audio/*_full.mp3"))
           items_xml = []
           for f in files:
-              st = os.stat(f)
-              size = st.st_size
+              st = os.stat(f); size = st.st_size
               info = ffprobe_json(f)
               dur  = float(info.get("format", {}).get("duration", 0))
               h = int(dur // 3600); m = int((dur % 3600) // 60); s = int(dur % 60)
@@ -81,29 +96,54 @@ jobs:
               items_xml.append(f"""
                 <item>
                   <title>{xu.escape(title)}</title>
+                  <itunes:title>{xu.escape(title)}</itunes:title>
                   <description>{xu.escape(title)}</description>
                   <enclosure url="{url}" length="{size}" type="audio/mpeg" />
                   <guid isPermaLink="false">{xu.escape(url)}</guid>
                   <pubDate>{pub_str}</pubDate>
                   <itunes:duration>{itunes_dur}</itunes:duration>
+                  <itunes:episodeType>full</itunes:episodeType>
+                  <itunes:explicit>{EXPLICIT}</itunes:explicit>
                 </item>
               """.strip())
 
+          # Channel 级别 RSS + iTunes 标签
+          image_xml = f"""
+            <image>
+              <url>{xu.escape(COVER_URL)}</url>
+              <title>{xu.escape(TITLE)}</title>
+              <link>{xu.escape(SITE_LINK)}</link>
+            </image>
+          """.strip() if COVER_URL else ""
+
+          itunes_image = f'<itunes:image href="{xu.escape(COVER_URL)}" />' if COVER_URL else ""
+
           rss = f"""<?xml version="1.0" encoding="UTF-8"?>
           <rss version="2.0"
-               xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
+               xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"
+               xmlns:atom="http://www.w3.org/2005/Atom">
             <channel>
-              <title>{xu.escape(SITE_TITLE)}</title>
+              <title>{xu.escape(TITLE)}</title>
               <link>{xu.escape(SITE_LINK)}</link>
-              <description>{xu.escape(SITE_DESC)}</description>
+              <description>{xu.escape(DESC)}</description>
               <language>en-us</language>
               <lastBuildDate>{time.strftime("%a, %d %b %Y %H:%M:%S +0000", time.gmtime())}</lastBuildDate>
+              <atom:link href="{xu.escape(FEED_URL)}" rel="self" type="application/rss+xml" />
+              {image_xml}
+              {itunes_image}
+              <itunes:author>{xu.escape(AUTHOR)}</itunes:author>
+              <itunes:owner>
+                <itunes:name>{xu.escape(OWNER_N)}</itunes:name>
+                <itunes:email>{xu.escape(OWNER_E)}</itunes:email>
+              </itunes:owner>
+              <itunes:category text="{xu.escape(CATEGORY)}" />
+              <itunes:explicit>{EXPLICIT}</itunes:explicit>
               {''.join(items_xml)}
             </channel>
           </rss>
           """
           pathlib.Path("docs/feed.xml").write_text(rss, encoding="utf-8")
-          print(f"[OK] wrote docs/feed.xml with {len(files)} item(s)")
+          print(f"[OK] wrote docs/feed.xml with {len(files)} item(s); cover={'yes' if COVER_URL else 'no'}")
           PY
 
       # ③ 提交规范化后的 mp3 和 feed.xml
@@ -112,7 +152,7 @@ jobs:
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add docs/audio docs/feed.xml
-          git commit -m "Normalize audio + update feed" || echo "No changes"
+          git commit -m "Normalize audio + update feed (with itunes & cover)" || echo "No changes"
           git push
 
       # ④ 创建 Release 并附带 mp3
