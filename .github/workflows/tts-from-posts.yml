@@ -3,6 +3,11 @@ name: TTS from posts
 on:
   workflow_dispatch:
 
+# ✅ 防并发：同一分支只保留最新一次运行，取消在途运行，避免触发 429
+concurrency:
+  group: tts-from-posts-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -19,52 +24,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install azure-cognitiveservices-speech pydub
-
-      - name: Install ffmpeg
-        run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg jq
+          sudo apt-get install -y ffmpeg
 
       - name: Verify Azure secrets
         run: |
           test -n "${{ secrets.SPEECH_KEY }}" || (echo "Missing SPEECH_KEY" && exit 1)
           test -n "${{ secrets.SPEECH_REGION }}" || (echo "Missing SPEECH_REGION" && exit 1)
-
-      # 可选检查：若接口 429，则跳过，不阻塞
-      - name: Check voices availability (best-effort)
-        env:
-          SPEECH_KEY: ${{ secrets.SPEECH_KEY }}
-          SPEECH_REGION: ${{ secrets.SPEECH_REGION }}
-        run: |
-          set -e
-          tries=6
-          delay=1
-          code=0
-          for i in $(seq 1 $tries); do
-            code=$(curl -sS -o voices.json -w "%{http_code}" \
-              -H "Ocp-Apim-Subscription-Key: ${SPEECH_KEY}" \
-              "https://${SPEECH_REGION}.tts.speech.microsoft.com/cognitiveservices/voices/list" \
-              || echo "000")
-            if [ "$code" = "200" ]; then break; fi
-            echo "Voice list HTTP $code; retrying in ${delay}s (attempt $i/$tries)"
-            sleep $delay
-            delay=$((delay*2))
-          done
-          if [ "$code" != "200" ]; then
-            echo "::warning::Could not fetch voices list (HTTP $code). Skipping availability check."
-            exit 0
-          fi
-
-          echo "Sample voices:"
-          jq -r '.[0:8][] | "\(.ShortName) | \(.Locale)"' voices.json || true
-
-          # 仅做提醒，不阻塞
-          if ! jq -r '.[].ShortName' voices.json | grep -xq "en-US-Emma:DragonHDLatestNeural"; then
-            echo "::warning::HD voice en-US-Emma:DragonHDLatestNeural not found in ${SPEECH_REGION}."
-          fi
-          if ! jq -r '.[].ShortName' voices.json | grep -xq "en-US-AndrewMultilingualNeural"; then
-            echo "::warning::Voice en-US-AndrewMultilingualNeural not found in ${SPEECH_REGION}."
-          fi
 
       - name: Debug posts folder
         run: |
@@ -78,30 +44,30 @@ jobs:
             break
           done
 
-      - name: Run TTS batch
+      # ✅ 强节流 + 混合声线（Host=Emma HD，Scientist=Andrew Multilingual）
+      - name: Run TTS batch (heavy throttling)
         env:
           SPEECH_KEY: ${{ secrets.SPEECH_KEY }}
           SPEECH_REGION: ${{ secrets.SPEECH_REGION }}
 
-          # 你当前想用的两个 HD 声线
           VOICE_HOST: en-US-Emma:DragonHDLatestNeural
-          VOICE_SCI:  en-US-Andrew:DragonHDLatestNeural
+          VOICE_SCI:  en-US-AndrewMultilingualNeural
 
-          # 速率：HD 不支持 <prosody>，因此这个对 HD 无效；保留给将来切回 Multilingual 用
+          # 速率仅对 Multilingual 生效（HD 不支持 <prosody>）
           SPEED: +20%
 
-          # ↓↓↓ 新增：全局节流参数（必要！避免 429）
-          THROTTLE_MS: "4000"        # 每块之间固定等待（毫秒）
-          CHUNK_PAUSE_EVERY: "4"     # 每 4 块，额外长休眠
-          CHUNK_PAUSE_SECS: "20"     # 额外长休眠秒数
-          RETRIES: "10"              # 每块最多重试次数
+          # ↓↓↓ 全局节流参数（和我给你的 tts_batch.py 对应）
+          THROTTLE_MS: "7000"        # 每块间隔 7s
+          CHUNK_PAUSE_EVERY: "3"     # 每 3 块长休眠
+          CHUNK_PAUSE_SECS: "35"     # 长休眠 35s
+          RETRIES: "12"              # 每块重试上限
+
         run: |
-          # 降低每块复杂度（但不要过小，块少=请求少=更稳）
-          python tts_batch.py --merge --max-chars 3000 --break-ms 300 --only-full-to-docs
+          # 尽量减少请求数（块更少）→ 降 429 概率；文本很长就适当调低
+          python tts_batch.py --merge --max-chars 3600 --max-sents 120 --break-ms 300 --only-full-to-docs
           echo "List outputs:"
           ls -alh tts_out || true
           ls -alh docs/audio || true
-
 
       - name: Commit merged audio
         run: |
