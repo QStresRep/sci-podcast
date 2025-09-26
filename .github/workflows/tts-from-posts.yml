@@ -3,7 +3,7 @@ name: TTS from posts
 on:
   workflow_dispatch:
 
-# 同一分支互斥，避免并发导致额外的 429
+# 同一分支互斥，避免并发触发额外 429
 concurrency:
   group: tts-from-posts-${{ github.ref }}
   cancel-in-progress: true
@@ -32,6 +32,29 @@ jobs:
           test -n "${{ secrets.SPEECH_KEY }}" || (echo "Missing SPEECH_KEY" && exit 1)
           test -n "${{ secrets.SPEECH_REGION }}" || (echo "Missing SPEECH_REGION" && exit 1)
 
+      # 🔎 冒烟测试（REST，一句“Hello”合成到 hello.mp3）
+      # 方便立刻判断 Key/Region 是否可用；失败就先修 Secrets/Region
+      - name: Smoke test TTS (REST, eastus)
+        env:
+          SPEECH_KEY: ${{ secrets.SPEECH_KEY }}
+          SPEECH_REGION: ${{ secrets.SPEECH_REGION }}   # ← 确保是 eastus
+        run: |
+          set -e
+          echo "Using region: ${SPEECH_REGION}"
+          cat > hello.ssml <<'SSML'
+<speak version='1.0' xml:lang='en-US'>
+  <voice name='en-US-EmmaMultilingualNeural'>Hello from Emma in eastus.</voice>
+</speak>
+SSML
+          curl -sS -f \
+            -H "Ocp-Apim-Subscription-Key: ${SPEECH_KEY}" \
+            -H "Content-Type: application/ssml+xml" \
+            -H "X-Microsoft-OutputFormat: audio-24khz-160kbitrate-mono-mp3" \
+            --data-binary @hello.ssml \
+            "https://${SPEECH_REGION}.tts.speech.microsoft.com/cognitiveservices/v1" \
+            -o hello.mp3
+          ls -alh hello.mp3
+
       - name: Debug posts folder
         run: |
           echo "Listing posts/"
@@ -44,23 +67,23 @@ jobs:
             break
           done
 
-      # 全 Multilingual（更稳），保留适度节流
-      - name: Run TTS batch (multilingual, throttled)
+      # 全 Multilingual，配合适度节流（和你当前 tts_batch.py 对应）
+      - name: Run TTS batch (multilingual, throttled, eastus)
         env:
           SPEECH_KEY: ${{ secrets.SPEECH_KEY }}
           SPEECH_REGION: ${{ secrets.SPEECH_REGION }}
 
           VOICE_HOST: en-US-EmmaMultilingualNeural
           VOICE_SCI:  en-US-AndrewMultilingualNeural
-          SPEED: +20%                   # 两个声线都支持 <prosody>，可调速
+          SPEED: +20%
 
-          # 与 tts_batch.py 对应的节流参数（适度保守，后续可下调）
-          THROTTLE_MS: "4000"          # 每块之间等 4s
-          CHUNK_PAUSE_EVERY: "4"       # 每 4 块长休眠
-          CHUNK_PAUSE_SECS: "20"       # 长休眠 20s
-          RETRIES: "10"                # 每块最多重试 10 次
+          # 节流参数（稳）
+          THROTTLE_MS: "6000"       # 每块间隔 6s
+          CHUNK_PAUSE_EVERY: "3"    # 每 3 块长休眠
+          CHUNK_PAUSE_SECS: "30"    # 长休眠 30s
+          RETRIES: "12"             # 每块最多重试 12 次
         run: |
-          # 让块稍微大一点以减少请求次数（更稳）
+          # 块稍大以减少请求次数
           python tts_batch.py --merge --max-chars 3600 --max-sents 120 --break-ms 300 --only-full-to-docs
           echo "List outputs:"
           ls -alh tts_out || true
