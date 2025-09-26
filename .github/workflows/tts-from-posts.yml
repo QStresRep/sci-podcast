@@ -3,7 +3,7 @@ name: TTS from posts
 on:
   workflow_dispatch:
 
-# ✅ 防并发：同一分支只保留最新一次运行，取消在途运行，避免触发 429
+# 同一分支互斥，避免并发导致额外的 429
 concurrency:
   group: tts-from-posts-${{ github.ref }}
   cancel-in-progress: true
@@ -25,7 +25,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install azure-cognitiveservices-speech pydub
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg jq
 
       - name: Verify Azure secrets
         run: |
@@ -44,26 +44,23 @@ jobs:
             break
           done
 
-      # ✅ 强节流 + 混合声线（Host=Emma HD，Scientist=Andrew Multilingual）
-      - name: Run TTS batch (heavy throttling)
+      # 全 Multilingual（更稳），保留适度节流
+      - name: Run TTS batch (multilingual, throttled)
         env:
           SPEECH_KEY: ${{ secrets.SPEECH_KEY }}
           SPEECH_REGION: ${{ secrets.SPEECH_REGION }}
 
-          VOICE_HOST: en-US-Emma:DragonHDLatestNeural
+          VOICE_HOST: en-US-EmmaMultilingualNeural
           VOICE_SCI:  en-US-AndrewMultilingualNeural
+          SPEED: +20%                   # 两个声线都支持 <prosody>，可调速
 
-          # 速率仅对 Multilingual 生效（HD 不支持 <prosody>）
-          SPEED: +20%
-
-          # ↓↓↓ 全局节流参数（和我给你的 tts_batch.py 对应）
-          THROTTLE_MS: "8000"        # 每块间隔 7s
-          CHUNK_PAUSE_EVERY: "3"     # 每 3 块长休眠
-          CHUNK_PAUSE_SECS: "45"     # 长休眠 35s
-          RETRIES: "14"              # 每块重试上限
-
+          # 与 tts_batch.py 对应的节流参数（适度保守，后续可下调）
+          THROTTLE_MS: "4000"          # 每块之间等 4s
+          CHUNK_PAUSE_EVERY: "4"       # 每 4 块长休眠
+          CHUNK_PAUSE_SECS: "20"       # 长休眠 20s
+          RETRIES: "10"                # 每块最多重试 10 次
         run: |
-          # 尽量减少请求数（块更少）→ 降 429 概率；文本很长就适当调低
+          # 让块稍微大一点以减少请求次数（更稳）
           python tts_batch.py --merge --max-chars 3600 --max-sents 120 --break-ms 300 --only-full-to-docs
           echo "List outputs:"
           ls -alh tts_out || true
