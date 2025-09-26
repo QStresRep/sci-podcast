@@ -32,20 +32,18 @@ jobs:
           test -n "${{ secrets.SPEECH_KEY }}" || (echo "Missing SPEECH_KEY" && exit 1)
           test -n "${{ secrets.SPEECH_REGION }}" || (echo "Missing SPEECH_REGION" && exit 1)
 
-      # 🔎 冒烟测试（REST，一句“Hello”合成到 hello.mp3）
-      # 方便立刻判断 Key/Region 是否可用；失败就先修 Secrets/Region
       - name: Smoke test TTS (REST, eastus)
         env:
           SPEECH_KEY: ${{ secrets.SPEECH_KEY }}
-          SPEECH_REGION: ${{ secrets.SPEECH_REGION }}   # ← 确保是 eastus
+          SPEECH_REGION: ${{ secrets.SPEECH_REGION }}
         run: |
           set -e
           echo "Using region: ${SPEECH_REGION}"
-          cat > hello.ssml <<'SSML'
-<speak version='1.0' xml:lang='en-US'>
-  <voice name='en-US-EmmaMultilingualNeural'>Hello from Emma in eastus.</voice>
-</speak>
-SSML
+          printf "%s\n" \
+            "<speak version='1.0' xml:lang='en-US'>" \
+            "  <voice name='en-US-EmmaMultilingualNeural'>Hello from Emma in eastus.</voice>" \
+            "</speak>" > hello.ssml
+
           curl -sS -f \
             -H "Ocp-Apim-Subscription-Key: ${SPEECH_KEY}" \
             -H "Content-Type: application/ssml+xml" \
@@ -53,7 +51,9 @@ SSML
             --data-binary @hello.ssml \
             "https://${SPEECH_REGION}.tts.speech.microsoft.com/cognitiveservices/v1" \
             -o hello.mp3
+
           ls -alh hello.mp3
+
 
       - name: Debug posts folder
         run: |
