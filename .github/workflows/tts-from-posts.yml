@@ -57,10 +57,10 @@ jobs:
           SPEED: +20%
 
           # ↓↓↓ 全局节流参数（和我给你的 tts_batch.py 对应）
-          THROTTLE_MS: "7000"        # 每块间隔 7s
+          THROTTLE_MS: "8000"        # 每块间隔 7s
           CHUNK_PAUSE_EVERY: "3"     # 每 3 块长休眠
-          CHUNK_PAUSE_SECS: "35"     # 长休眠 35s
-          RETRIES: "12"              # 每块重试上限
+          CHUNK_PAUSE_SECS: "45"     # 长休眠 35s
+          RETRIES: "14"              # 每块重试上限
 
         run: |
           # 尽量减少请求数（块更少）→ 降 429 概率；文本很长就适当调低
